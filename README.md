@@ -87,7 +87,7 @@ The model integrates multiple data sources:
 - Calculate rolling statistics and seasonal components
 - Determine epidemic phase
 
-### 3. **Rolling Validation** (Lines 440-587)
+### 3. **Rolling Validation** 
 - For each week in the validation period (Sept 2022 – Oct 2025):
   - Train quantile regression models on all prior data
   - Identify analogs from historical pool
@@ -98,11 +98,11 @@ The model integrates multiple data sources:
   - Compute Mean Absolute Error (MAE) in log space
   - Select best hyperparameters per horizon
 
-### 4. **Model Training** (Lines 594-618)
+### 4. **Model Training** 
 - Fit final quantile regression models for horizons 0–3 using all training data
 - Capture residuals by phase for uncertainty quantification
 
-### 5. **Forecast Generation** (Lines 622-772)
+### 5. **Forecast Generation** 
 - Generate predictions at 23 quantile levels (0.01–0.99)
 - Blend QR and analog predictions using phase-specific weights
 - Apply phase-conditioned interval scaling
@@ -153,26 +153,6 @@ During decline phases:
 - **Candidates Evaluated**: 6 × 6 × 11 = **396 configurations** per horizon
 - **Selection**: Best MAE per horizon
 
-## Output Format
-
-### CDC Submission File
-```
-reference_date, target, horizon, location, target_end_date, output_type, output_type_id, value
-2025-06-07, wk inc flu hosp, 0, 45, 2025-06-07, quantile, 0.025, 125
-2025-06-07, wk inc flu hosp, 0, 45, 2025-06-07, quantile, 0.500, 150
-...
-```
-
-### Software Implementation / Evaluation Files
-Contains columns:
-- `reference_date` - Week of submission
-- `target` - Target specification (e.g., "wk inc flu hosp")
-- `target_end_date` - Week ending date
-- `location_general` - "state"
-- `location` - "SC"
-- `value` - Point estimate or historical value
-- `disease`, `population`, `outcome_measure` - Metadata
-- `output_type`, `output_type_id` - Quantile specification
 
 ## Requirements
 
@@ -191,7 +171,6 @@ library(slider)         # Rolling windows
 ### Data Files
 - RFA weekly influenza data (2017–2025)
 - CDC hospital admissions (NHSN)
-- MUSC weekly influenza surveillance
 - Prisma Health weekly influenza surveillance
 
 **Note**: Data paths are currently hardcoded to local Box Cloud Storage directories. Modify paths before running.
@@ -201,11 +180,11 @@ library(slider)         # Rolling windows
 ```
 Data Loading
     ↓
-Feature Engineering (38+ features)
+Feature Engineering 
     ↓
 Phase Classification
     ↓
-Rolling Validation (396 configs × 4 horizons)
+Rolling Validation 
     ↓
 Hyperparameter Selection (best MAE)
     ↓
@@ -241,25 +220,6 @@ Visualization & Diagnostics
 - Forecast medians
 - Analog pool statistics (n, mean change, weight concentration)
 
-## Future Extensions
-
-Potential improvements:
-- Regional/substate level forecasts
-- Multi-target modeling (tests, outpatient visits)
-- Ensemble with other methods
-- Real-time data integration
-- Dynamic phase transitions
-- Batch forecast generation
-
-## Contact
-
-**Principal Investigator**: Tanvir Ahammed  
-**Affiliation**: Clemson University, South Carolina  
-**Email**: tahamme@g.clemson.edu
-
-## Funding
-
-Supported by the Center for Forecasting and Outbreak Analytics of the Centers for Disease Control and Prevention (CDC) under award number NU38FT000011 and the National Library of Medicine of the National Institutes of Health.
 
 ## License
 
