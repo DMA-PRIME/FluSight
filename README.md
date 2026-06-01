@@ -19,8 +19,8 @@ This repository contains a **hybrid forecasting model** for predicting weekly in
 - **Analog Correction**: Identifies historical periods with similar epidemiological states and uses their outcomes to adjust predictions
 - **Decline-Aware Weighting**: Applies phase-specific penalties during decline periods to reduce overly optimistic rebound predictions
 
-### 2. Rich Feature Engineering
-The model uses 38+ engineered features including:
+### 2. Feature Engineering
+The model uses engineered features including:
 - **Lag features**: Target values at 1, 2, 3, 4, 5, 8, and 12-week lags
 - **Slope features**: 1-4 week slopes and slope changes to capture trajectory
 - **Acceleration features**: Rate of change in slopes (2-week and 3-week acceleration)
