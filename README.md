@@ -56,7 +56,7 @@ The model integrates multiple data sources:
 
 ### Files
 
-- **`QR.r`** - Main forecasting pipeline (993 lines)
+- **`QR.r`** - Main forecasting pipeline 
   - Data loading and merging
   - Feature engineering
   - Phase labeling
