@@ -1,4 +1,4 @@
-# FluSight: Hybrid Quantile Regression + Analog Forecasting for Influenza Hospitalizations
+# FluSight: Hybrid Quantile Regression Forecasting for Influenza Hospitalizations
 
 ## Overview
 
