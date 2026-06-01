@@ -49,9 +49,8 @@ Phase detection drives adaptive interval scaling and QR floor constraints.
 The model integrates multiple data sources:
 - **CDC NHSN Data**: Official weekly flu hospitalizations (location 45 = South Carolina)
 - **Electronic Health Record (EHR) Data**: 
-  - MUSC (Medical University of South Carolina) weekly influenza data
   - Prisma Health weekly influenza surveillance data
-- **Viral Testing Data**: Rapid assessment of circulation intensity via positive test rates
+
 
 ## Repository Contents
 
