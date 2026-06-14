@@ -1,7 +1,7 @@
 team_name: "CPHMR, Clemson University"
 team_abbr: "DMAPRIME"
 model_name: "Recursive Quantile Regression"
-model_abbr: "QR-v4"
+model_abbr: "QR"
 model_contributors: [
   {
     "name": "Tanvir Ahammed",
@@ -11,14 +11,14 @@ model_contributors: [
 ]
 license: "CC-BY-4.0"
 designated_model: true
-data_inputs: "CDC weekly flu hospital admissions (NHSN), EHR surveillance data (weekly flu test volumes, positive tests, inpatient hospitalizations from MUSC and Prisma Health)"
+data_inputs: "CDC weekly flu hospital admissions (NHSN), EHR surveillance data (weekly flu test volumes, positive tests, inpatient hospitalizations)"
 
 methods: "Recursive Quantile Regression with Phase-Aligned Analog Correction"
-methods_long: "A hybrid recursive forecasting model that applies a single-step quantile regression (H0) iteratively across multiple forecast horizons (H0, H1, H2, H3). After forecasting each horizon, the predicted value is appended to the feature dataframe and all lag/slope/rolling statistics features are recomputed before forecasting the next horizon. This recursive architecture eliminates horizon shift architecturally. The model integrates phase-specific analog correction, where historical periods with similar epidemiological states provide trajectory-informed adjustments. All evaluation uses origin-specific thresholds (slope/acceleration/volatility percentiles) computed from data ≤ origin_week only, ensuring zero temporal leakage. Predictors include 38+ engineered features (lag/slope/acceleration/rolling statistics/EHR indicators/seasonal components). Phase detection (9 classes) drives adaptive blending weights and interval scaling. Real-time surveillance data from Prisma Health and MUSC supplements CDC NHSN observations."
+methods_long: "A hybrid recursive forecasting model that applies a single-step quantile regression (H0) iteratively across multiple forecast horizons (H0, H1, H2, H3). After forecasting each horizon, the predicted value is appended to the feature dataframe and all lag/slope/rolling statistics features are recomputed before forecasting the next horizon. The model integrates phase-specific analog correction, where historical periods with similar epidemiological states provide trajectory-informed adjustments. Predictors include 38+ engineered features (lag/slope/acceleration/rolling statistics/EHR indicators/seasonal components). Phase detection (9 classes) drives adaptive blending weights and interval scaling. Real-time surveillance data from Prisma Health supplements CDC NHSN observations."
 
 ensemble_of_models: false
 ensemble_of_hub_models: false
-model_version: "2.0"
+model_version: "1.9"
 website_url: "https://github.com/DMA-PRIME/FluSight"  
-team_funding: "Center for Forecasting and Outbreak Analytics of the Centers for Disease Control and Prevention (CDC) under award number NU38FT000011 and National Library of Medicine of the National Institutes of Health under award number R01LM013027."
+team_funding: "Center for Forecasting and Outbreak Analytics of the Centers for Disease Control and Prevention (CDC) under award number NU38FT000011 and National Library of Medicine of the National Institutes of Health under award number R01LM014193."
 backfill_adjustment: "false"
