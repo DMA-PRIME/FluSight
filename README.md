@@ -4,27 +4,14 @@
 
 This repository contains a **recursive hybrid forecasting model** for predicting weekly influenza-related inpatient hospitalizations in South Carolina. The model applies **1-step quantile regression recursively across multiple horizons**, combining **direct quantile regression with phase-aligned analog correction**.
 
-## Model Name
-
-- **Full Name**: DMAPRIME Quantile Regression v4 – Recursive Forecasting (DMAPRIME-QR-v4)
-- **Team**: CPHMR (Center for Public Health and Medical Research), Clemson University
-- **Model Abbr**: QR-v4
-- **Version**: 2.0
-- **License**: CC-BY-4.0
 
 ## Key Features
 
-### 1. Recursive Forecasting Architecture (NEW in v4)
-- **Previous approach (v3)**: Direct multi-horizon forecasting
-  - Fit separate H0, H1, H2, H3 models independently
-  - Post-processed to prevent horizon shift (reactive, not proactive)
-  
-- **New approach (v4)**: Recursive 1-step forecasting
+### 1. Recursive Forecasting Architecture 
   - Fit H0 model (1-step ahead quantile regression)
   - Append H0 prediction to feature series and recompute all features (slopes, lags, rolling stats, phase)
   - Use updated features to forecast H1 with the same H0 model
   - Repeat for H2, H3
-  - **Benefit**: Horizon shift is architecturally impossible; no post-processing needed
 
 ### 2. Hybrid Forecasting Approach
 - **Quantile Regression (QR)**: 1-step horizon-specific quantile regression model
@@ -62,13 +49,13 @@ The model integrates multiple data sources:
 - **CDC NHSN Data**: Official weekly flu hospitalizations (location 45 = South Carolina)
 - **Electronic Health Record (EHR) Data**: 
   - Prisma Health weekly influenza surveillance data
-  - MUSC weekly influenza surveillance data
+
 
 ## Repository Contents
 
 ### Files
 
-- **`QR.r`** - Main forecasting pipeline (v4 — recursive)
+- **`QR.r`** - Main forecasting pipeline 
   - Data loading and merging
   - Feature engineering
   - Phase labeling with origin-specific thresholds (no temporal leakage)
@@ -93,12 +80,12 @@ The model integrates multiple data sources:
 ## Workflow
 
 ### 1. **Data Preparation**
-- Load CDC, MUSC, and Prisma weekly hospitalization data
+- Load CDC and Prisma weekly hospitalization data
 - Align datasets by week
 - Standardize column names
 
 ### 2. **Feature Engineering**
-- Compute 38+ predictive features from historical time series
+- Compute predictive features from historical time series
 - Apply log transformation with safe handling of zero/missing values
 - Calculate rolling statistics and seasonal components
 - Determine epidemic phase using origin-specific thresholds
@@ -155,17 +142,6 @@ The model integrates multiple data sources:
 - Marks forecast origin line
 - Indicates detected phase in title
 
-## Data Leakage Prevention (v4 — Fully Corrected)
-
-**All temporal leakage removed.** Every evaluation origin uses only data ≤ origin_week.
-
-- **Threshold Computation**: `compute_origin_thresholds(df, cutoff_week)` computes slope/accel/volatility cuts strictly from rows where week ≤ cutoff_week
-- **Phase Assignment**: Uses origin-specific thresholds (no global variable closure); called with cutoff_week at every origin
-- **QR Training**: `get_label_known_training()` enforces week + (h+1) ≤ cutoff
-- **Analog Pool**: Cutoff = origin_week; future labels masked to NA when week+4 > origin_week
-- **Synthetic Rows**: Preserve origin_row's EHR state (constant values) but recompute epidemiological features fresh using extended log_target vector
-
-**Result**: Retrospective evaluation scores reflect genuine out-of-sample performance. A forecast issued on 2023-01-14 uses thresholds estimated from data through 2023-01-14 only — exactly what a real forecaster would have.
 
 ## Key Hyperparameters
 
@@ -211,7 +187,6 @@ library(scales)         # Plot scaling
 ### Data Files
 - RFA weekly influenza data (2017–2025)
 - CDC hospital admissions (NHSN)
-- MUSC weekly influenza surveillance
 - Prisma Health weekly influenza surveillance
 
 **Note**: Data paths are currently hardcoded to local Box Cloud Storage directories. Modify paths before running.
@@ -267,15 +242,6 @@ Visualization & Diagnostics
 - QR vs. analog blend weights
 - Peak probability forecasts (prob_peak_by_1/2/3/4)
 
-## Architecture Changes from v3 → v4
-
-| Aspect | v3 (Direct) | v4 (Recursive) |
-|--------|-------------|----------------|
-| **Forecasting** | 4 independent H0–H3 models | Single H0 model applied recursively |
-| **Horizon shift** | Post-processed away (anti_shift_postprocess) | Architecturally impossible |
-| **Tuning** | Per-horizon (396 configurations: 6×6×11) | H0 only (36 configurations: 6×6) |
-| **Features for H1/H2/H3** | Fixed from origin week | Updated with prior predictions |
-| **Data leakage** | Partially corrected | Fully corrected (origin-aware thresholds) |
 
 ## License
 
@@ -284,4 +250,4 @@ Creative Commons Attribution 4.0 International (CC-BY-4.0)
 ---
 
 **Last Updated**: June 14, 2026  
-**Model Version**: 2.0
+**Model Version**: 1.9
