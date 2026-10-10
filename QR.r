@@ -1,36 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# DMAPRIME-QR v4: State-Level Influenza Hospitalization Forecast
-#
-# KEY CHANGE FROM v3 → v4:
-#   Switched from DIRECT multi-horizon forecasting to RECURSIVE forecasting.
-#
-#   v3 (direct):   Fit separate H0, H1, H2, H3 models independently.
-#                  Then post-process to prevent horizon shift.
-#                  Problem: models don't share state; anti-shift logic fights
-#                  a problem the model architecture creates.
-#
-#   v4 (recursive): Forecast H0 first. Append that prediction to the feature
-#                   series. Recompute all features (slopes, lags, phase, etc.)
-#                   on the extended series. Forecast H1 using the updated
-#                   features. Repeat for H2, H3.
-#                   Result: horizon shift is architecturally impossible.
-#                   anti_shift_postprocess is no longer needed.
-#
-# What stays the same:
-#   - QR model structure and predictor sets
-#   - Analog selection with phase gating and penalty weights
-#   - Phase classification logic
-#   - Rolling validation / tuning
-#   - All output formats (CDC submission, software files, plots)
-#
-# New functions:
-#   append_forecast_row()      — extends feature df with a synthetic row
-#   recompute_features_tail()  — recomputes rolling/lag features for last row
-#   forecast_origin_v4()       — recursive loop replacing forecast_origin_v3()
-#
-# Removed:
-#   anti_shift_postprocess_v3() — no longer needed
-# ══════════════════════════════════════════════════════════════════════════════
+
 
 suppressPackageStartupMessages({
    library(dplyr)
@@ -45,43 +13,7 @@ suppressPackageStartupMessages({
 })
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DATA LEAKAGE AUDIT (v4 — fully corrected)
-#
-# ALL LEAKAGE REMOVED. Every evaluation origin uses only data <= origin_week.
-#
-# ARCHITECTURE:
-#   compute_origin_thresholds(df, cutoff_week)
-#     → slope_cut, accel_cut, vol_cut, slope_q25, global_slope_sd
-#     → computed from df rows where week <= cutoff_week ONLY
-#     → called at every origin in: tuning loop, retrospective loop, final forecast
-#
-#   assign_phase(df, thr)
-#     → takes an explicit thr list (no global variable closure)
-#     → called with origin-specific thr everywhere
-#
-#   append_forecast_row(df, new_week, pred_log, origin_row, thr)
-#     → passes thr through so synthetic rows get origin-specific phase labels
-#
-#   forecast_origin_v4(..., thr, ...)
-#     → uses thr$global_slope_sd for decline penalties
-#     → passes thr to every append_forecast_row call
-#
-# VERIFIED SAFE:
-#   - QR model: get_label_known_training() enforces week+(h+1) <= cutoff
-#   - Analog pool: cutoff = origin_week, future_change_h0 correctly bounded
-#   - future_peak_offset_4wk: label column, masked to NA when week+4 > origin_week
-#   - Tuning y_true: used only as scoring label, not as predictor
-#   - Hyperparameter tuning window: train_cut to valid_end (ends 2025-10-01)
-#     Eval window starts at eval_start (default 2025-12-06) — no overlap
-#
-# WHAT THIS MEANS FOR REPORTED SCORES:
-#   AI scores in the retrospective evaluation now reflect genuine out-of-sample
-#   performance. A forecast issued on 2023-01-14 uses thresholds estimated from
-#   data through 2023-01-14 only — exactly what a real forecaster would have.
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 0. CONFIGURATION  (unchanged from v3)
+# 0. CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 quantiles <- c(
@@ -97,23 +29,21 @@ candidate_bandwidth <- c(0.50, 0.75, 1.00, 1.25, 1.50, 2.00)
 candidate_blend_qr <- seq(0, 1, by = 0.10)
 
 train_cut <- as.Date("2022-09-01")
-valid_end <- as.Date("2025-10-01")
+valid_end <- as.Date("2025-10-01")  
 
-eval_start <- as.Date("2025-11-06")
-eval_end   <- as.Date("2025-03-07")
+eval_start <- as.Date("2025-11-06")  
+eval_end   <- as.Date("2026-03-07")
 
+# train_cut <- as.Date("2022-09-01")
+# valid_end <- as.Date("2024-10-01")
+# eval_start <- as.Date("2024-11-06")
+# eval_end   <- as.Date("2025-03-07")
 
-
-
-train_cut <- as.Date("2022-09-01")
-valid_end <- as.Date("2024-10-01")
-eval_start <- as.Date("2024-11-06")
-eval_end   <- as.Date("2025-03-07")
-
-
+RUN_LEAKAGE_TEST       <- TRUE   # section 14a; stops the run on failure
+LEAKAGE_TEST_N_ORIGINS <- 3
 
 path_rfa <- "/Users/tanvirahammed/Library/CloudStorage/Box-Box/BoxPHI-PHMR Projects/Data/SC Health Records/RFA/Years 2017-2025/Weekly data/RFA_weekly_influenza_region_incident.csv"
-path_cdc <- '/Users/tanvirahammed/Library/CloudStorage/Box-Box/BoxPHI-PHMR Projects/Data/CDC Data/CDC Hospital Repository Data/Weekly_Hospital_Respiratory_Data_(Preliminary).csv'
+path_cdc <- '/Users/tanvirahammed/Downloads/target-hospital-admissions-22.csv'
 path_musc <- "/Users/tanvirahammed/Library/CloudStorage/Box-Box/BoxPHI-PHMR Projects/Data/MUSC/Infectious Disease EHR/Weekly Data/Latest Weekly Data/MUSC_Weekly_Influenza_State_dx_cond_lab_Incident.csv"
 path_prisma <- "/Users/tanvirahammed/Library/CloudStorage/Box-Box/BoxPHI-PHMR Projects/Data/Prisma Health/Infectious Disease EHR/Weekly Data/Latest Weekly Data/Prisma_Health_Weekly_Influenza_State_dx_cond_lab_Incident.csv"
 
@@ -123,23 +53,45 @@ output_dir_software_eval <- "/Users/tanvirahammed/Library/CloudStorage/Box-Box/B
 
 target_var <- "cdc_Total.Influenza.Admissions"
 
+TARGET_LOCATION <- "45"     # SC FIPS
+TARGET_STATE    <- "SC"
+
+#  "none"  = v4-LP behaviour. RUN THIS FIRST.
+#  "pct"   = adds pct_states_rising.
+EXTERNAL_SET <- "pct"
+
+# ── v5.1 anti-lag switches (all off = v5-LP exactly) ─────────────────────────
+DIRECT_BLEND   <- FALSE      # TRUE: blend recursive median with direct H1-H3 QR
+EHR_MODE       <- "model"   # "freeze" (v5-LP) or "model" (forecast EHR forward)
+PEAK_PULL      <- FALSE      # TRUE: analog peak timing pulls H1-H3 down
+PATH_TUNE_STEP <- 2          # use every k-th validation origin for path tuning
+
+# ── v5.2 switches (both off = v5.1 exactly) ──────────────────────────────────
+SEASON_GATE      <- TRUE    # TRUE: peak/decline labels need an in-season level
+SEASON_GATE_FRAC <- 0.25     # ... recent max >= this x typical season peak
+POOL_STATES      <- TRUE    # TRUE: extra QR models trained on all states
+
+if (!EHR_MODE %in% c("freeze", "model")) stop("EHR_MODE must be 'freeze' or 'model'")
+
+.cfg_tag <- paste0(EXTERNAL_SET,
+                   if (DIRECT_BLEND) "_direct" else "",
+                   if (EHR_MODE == "model") "_ehrmodel" else "",
+                   if (PEAK_PULL) "_peakpull" else "",
+                   if (SEASON_GATE) "_seasongate" else "",
+                   if (POOL_STATES) "_pool" else "")
+MODEL_LABEL <- paste0("DMAPRIME-QR v5.2-LP [", gsub("_", " + ", .cfg_tag), "]")
+MODEL_TAG   <- paste0("v52LP_", .cfg_tag, "_dec2025_mar2026")
+
+# needed by the external-signal block; section 2 redefines it identically
+safe_log <- function(x) log(pmax(x, 0) + 1)
+
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. LOAD DATA  (unchanged from v3)
+# 1. LOAD DATA - multi-state CDC panel + cross-state signal
 # ══════════════════════════════════════════════════════════════════════════════
 
 RFA_data_Influenza <- read_csv(path_rfa, show_col_types = FALSE)
 
-CDC <- read_csv(path_cdc, show_col_types = FALSE) %>%
-   #filter(location == "45") %>%
-   dplyr::select(
-      week = Week.Ending.Date,
-      cdc_Total.Influenza.Admissions = Total.Influenza.Admissions
-   ) %>%
-   mutate(week = as.Date(week))
-
-
-
-MUSC_Weekly_Influenza <- read_csv(path_musc, show_col_types = FALSE)
+MUSC_Weekly_Influenza   <- read_csv(path_musc,   show_col_types = FALSE)
 Prisma_Weekly_Influenza <- read_csv(path_prisma, show_col_types = FALSE)
 
 prep_source <- function(df, date_col, prefix) {
@@ -152,9 +104,177 @@ prep_source <- function(df, date_col, prefix) {
 prisma <- prep_source(Prisma_Weekly_Influenza, "Week", "prisma_")
 musc   <- prep_source(MUSC_Weekly_Influenza,   "Week", "musc_")
 
-flu <- CDC %>%
-   full_join(prisma, by = "week") %>%
-   full_join(musc,   by = "week") %>%
+for (.src in c("prisma", "musc")) {
+   if (anyDuplicated(get(.src)$week) > 0) stop(.src, " has duplicate weeks.")
+}
+
+# ── read the CDC file as a panel ─────────────────────────────────────────────
+
+cdc_raw <- read_csv(path_cdc, show_col_types = FALSE)
+
+.pick_col <- function(df, candidates) {
+   hit <- candidates[candidates %in% names(df)]
+   if (length(hit)) hit[1] else NA_character_
+}
+
+.col_week  <- .pick_col(cdc_raw, c("Week.Ending.Date", "Week Ending Date",
+                                   "week_ending_date", "target_end_date",
+                                   "date", "week"))
+.col_flu   <- .pick_col(cdc_raw, c("Total.Influenza.Admissions",
+                                   "Total Influenza Admissions",
+                                   "total_influenza_admissions", "value"))
+.col_loc   <- .pick_col(cdc_raw, c("location", "Location", "fips", "FIPS"))
+.col_rate  <- .pick_col(cdc_raw, c("weekly_rate", "Weekly.Rate", "rate"))   # v5.2 pooling
+.col_state <- .pick_col(cdc_raw, c("state", "State", "location_name",
+                                   "Geographic.aggregation",
+                                   "Geographic aggregation", "jurisdiction"))
+
+if (is.na(.col_week)) stop("Cannot find a week column in: ",
+                           paste(head(names(cdc_raw), 30), collapse = ", "))
+if (is.na(.col_flu))  stop("Cannot find a flu-admissions column in: ",
+                           paste(head(names(cdc_raw), 30), collapse = ", "))
+
+.has_panel <- !is.na(.col_loc) || !is.na(.col_state)
+
+cat(sprintf("[cdc] week col: '%s' | flu col: '%s' | geo col: '%s'\n",
+            .col_week, .col_flu,
+            if (.has_panel) paste(na.omit(c(.col_loc, .col_state)), collapse = "/")
+            else "NONE - file appears pre-filtered"))
+
+if (!all(c("Week.Ending.Date", "Total.Influenza.Admissions") %in% names(cdc_raw))) {
+   cat("[cdc] NOTE: this is not the file v4 read; v4 scores are not directly comparable.\n")
+   if (!is.na(.col_flu) && .col_flu == "value" && "weekly_rate" %in% names(cdc_raw)) {
+      cat("[cdc]       Using 'value' (count); 'weekly_rate' is per 100k.\n")
+   }
+}
+
+cdc_panel <- cdc_raw %>%
+   transmute(
+      week = as.Date(.data[[.col_week]]),
+      value = as.numeric(.data[[.col_flu]]),
+      rate  = if (!is.na(.col_rate)) as.numeric(.data[[.col_rate]]) else NA_real_,
+      geo = if (!is.na(.col_loc)) as.character(.data[[.col_loc]])
+      else if (!is.na(.col_state)) as.character(.data[[.col_state]])
+      else TARGET_STATE
+   ) %>%
+   filter(!is.na(week), !is.na(geo)) %>%
+   arrange(geo, week)
+
+if (.has_panel) {
+   cat(sprintf("[cdc] %d jurisdictions | %d rows | %s to %s\n",
+               dplyr::n_distinct(cdc_panel$geo), nrow(cdc_panel),
+               format(min(cdc_panel$week)), format(max(cdc_panel$week))))
+}
+
+.target_key <- if (TARGET_LOCATION %in% cdc_panel$geo) TARGET_LOCATION else
+   if (TARGET_STATE %in% cdc_panel$geo) TARGET_STATE else
+      if ("South Carolina" %in% cdc_panel$geo) "South Carolina" else
+         NA_character_
+
+if (is.na(.target_key)) {
+   stop("Neither '", TARGET_LOCATION, "' nor '", TARGET_STATE,
+        "' found in the geo column. Values present: ",
+        paste(head(sort(unique(cdc_panel$geo)), 60), collapse = ", "))
+}
+
+# "US" matches ^[A-Z]{2}$ but is the national row - exclude aggregates
+.aggregate_keys <- c("US", "USA", "National", "United States", "0", "00")
+
+.is_state_key <- function(x) {
+   (grepl("^[0-9]{1,2}$", x) | grepl("^[A-Z]{2}$", x)) & !(x %in% .aggregate_keys)
+}
+
+cat(sprintf("[cdc] target key: '%s'\n", .target_key))
+
+if (.has_panel) {
+   .keys <- sort(unique(cdc_panel$geo))
+   .kept <- .keys[.is_state_key(.keys) & .keys != .target_key]
+   .drop <- setdiff(.keys, c(.kept, .target_key))
+   cat(sprintf("[cdc] %d keys counted in pct_states_rising\n", length(.kept)))
+   if (length(.drop) > 0) {
+      cat(sprintf("[cdc] %d excluded as aggregates/non-states: %s\n",
+                  length(.drop), paste(head(.drop, 15), collapse = ", ")))
+   }
+   if (length(.kept) < 30) {
+      cat("[cdc] WARNING: fewer than 30 states counted - pct_states_rising is noisy.\n")
+   }
+}
+
+# helper: sum that keeps an all-missing week missing (the original turned it into 0)
+.sum_or_na <- function(x) if (all(is.na(x))) NA_real_ else sum(x, na.rm = TRUE)
+
+# ── target: SC, under the v4 column name ─────────────────────────────────────
+
+CDC <- cdc_panel %>%
+   filter(geo == .target_key) %>%
+   group_by(week) %>%
+   summarise(cdc_Total.Influenza.Admissions = .sum_or_na(value), .groups = "drop") %>%
+   arrange(week)
+
+cat(sprintf("[cdc] %s target: %d weeks | %s to %s\n",
+            .target_key, nrow(CDC), format(min(CDC$week)), format(max(CDC$week))))
+
+# ── external signal: share of OTHER states rising ────────────────────────────
+# Uses each state's value at week t and week t-7 only (date-matched, not
+# row-lagged, so a state's missing week cannot turn a 2-week change into a
+# "1-week" one). Nothing after week t enters week t's value.
+
+external_signals <- cdc_panel %>%
+   filter(geo != .target_key, .is_state_key(geo)) %>%
+   group_by(geo, week) %>%
+   summarise(value = .sum_or_na(value), .groups = "drop") %>%
+   group_by(geo) %>%
+   mutate(
+      prev_value = value[match(week - 7, week)],
+      st_slope   = safe_log(value) - safe_log(prev_value)
+   ) %>%
+   ungroup() %>%
+   group_by(week) %>%
+   summarise(
+      pct_states_rising  = if (all(is.na(st_slope))) NA_real_ else mean(st_slope > 0, na.rm = TRUE),
+      n_states_reporting = sum(!is.na(st_slope)),
+      .groups = "drop"
+   ) %>%
+   arrange(week)
+
+ext_vars <- switch(
+   EXTERNAL_SET,
+   none = character(0),
+   pct  = c("pct_states_rising"),
+   stop("EXTERNAL_SET must be 'none' or 'pct'")
+)
+
+if (length(ext_vars) > 0 && !.has_panel) {
+   stop("EXTERNAL_SET='pct' needs a multi-state CDC file, but no state or ",
+        "location column was found in:\n  ", path_cdc,
+        "\nSet EXTERNAL_SET <- \"none\" or point path_cdc at a panel file.")
+}
+
+if (length(ext_vars) > 0) {
+   cat(sprintf("[cdc] pct_states_rising: %d weeks | median %.0f states reporting\n",
+               nrow(external_signals), median(external_signals$n_states_reporting)))
+}
+cat(sprintf("[cdc] EXTERNAL_SET='%s' -> %d external predictors\n",
+            EXTERNAL_SET, length(ext_vars)))
+
+# ── gap-free weekly grid anchored on the SC target weeks (fix L5) ────────────
+
+week_grid <- tibble(week = seq(min(CDC$week), max(CDC$week), by = "week"))
+if (!all(CDC$week %in% week_grid$week)) {
+   stop("CDC weeks do not fall on a regular 7-day grid (mixed weekdays?).")
+}
+
+.prisma_cov <- mean(week_grid$week %in% prisma$week)
+cat(sprintf("[ehr] Prisma covers %.0f%% of CDC weeks\n", 100 * .prisma_cov))
+if (.prisma_cov == 0) {
+   stop("No Prisma week matches a CDC week - check that both use the same week-ending weekday.")
+}
+
+flu <- week_grid %>%
+   left_join(CDC, by = "week") %>%
+   left_join(dplyr::select(external_signals, week, all_of(ext_vars)), by = "week") %>%
+   left_join(prisma, by = "week") %>%
+   left_join(musc,   by = "week") %>%
    arrange(week)
 
 optional_cols <- c(
@@ -166,8 +286,72 @@ for (nm in optional_cols) {
    if (!nm %in% names(flu)) flu[[nm]] <- NA_real_
 }
 
+if (anyDuplicated(flu$week) > 0) stop("Duplicate weeks in `flu` - a join multiplied rows.")
+
+if (length(ext_vars) > 0) {
+   .lost <- flu %>%
+      filter(!is.na(.data[[target_var]]), is.na(.data[["pct_states_rising"]])) %>%
+      nrow()
+   if (.lost > 0)
+      cat(sprintf("[cdc] NOTE: %d weeks have a target but no external signal - these drop as origins.\n",
+                  .lost))
+}
+
+# ── v5.2 POOL_STATES: every other state as extra training data ──────────────
+
+pool_flu_list <- list()
+if (POOL_STATES) {
+   if (!.has_panel) stop("POOL_STATES needs the multi-state CDC file.")
+   if (is.na(.col_rate)) {
+      stop("POOL_STATES needs a per-100k rate column (e.g. 'weekly_rate') to ",
+           "rescale states to SC's population.")
+   }
+   .pop_src <- cdc_panel %>%
+      filter(week < eval_start, !is.na(value), !is.na(rate), value > 0, rate > 0)
+   pop_by_geo <- .pop_src %>%
+      group_by(geo) %>%
+      summarise(pop = median(value / rate * 1e5), .groups = "drop")
+   .pop_sc <- pop_by_geo$pop[pop_by_geo$geo == .target_key]
+   if (length(.pop_sc) != 1 || !is.finite(.pop_sc)) {
+      stop("Cannot derive SC's population from the rate column.")
+   }
+   .pool_geos <- pop_by_geo %>%
+      filter(geo != .target_key, .is_state_key(geo), is.finite(pop), pop > 0) %>%
+      pull(geo)
+   .skipped <- character(0)
+   for (g in .pool_geos) {
+      s_g <- cdc_panel %>%
+         filter(geo == g) %>%
+         group_by(week) %>%
+         summarise(v = .sum_or_na(value), .groups = "drop") %>%
+         arrange(week)
+      if (nrow(s_g) < 60) { .skipped <- c(.skipped, g); next }
+      grid_g <- tibble(week = seq(min(s_g$week), max(s_g$week), by = "week"))
+      if (!all(s_g$week %in% grid_g$week)) { .skipped <- c(.skipped, g); next }
+      fac <- .pop_sc / pop_by_geo$pop[pop_by_geo$geo == g]
+      d_g <- grid_g %>%
+         left_join(s_g, by = "week") %>%
+         mutate(v = v * fac)
+      names(d_g)[names(d_g) == "v"] <- target_var
+      d_g <- d_g %>%
+         left_join(dplyr::select(external_signals, week, all_of(ext_vars)), by = "week")
+      for (nm in optional_cols) d_g[[nm]] <- NA_real_
+      d_g$pool_geo <- g
+      pool_flu_list[[g]] <- d_g
+   }
+   cat(sprintf("[pool] %d states pooled (rescaled to SC population %.0f)%s\n",
+               length(pool_flu_list), .pop_sc,
+               if (length(.skipped)) paste0(" | skipped: ", paste(.skipped, collapse = ", ")) else ""))
+   if (length(pool_flu_list) < 10) {
+      cat("[pool] WARNING: fewer than 10 states pooled - pooling adds little.\n")
+   }
+}
+
+cat(sprintf("[data] flu: %d weeks (%s to %s) | %d cols\n",
+            nrow(flu), format(min(flu$week)), format(max(flu$week)), ncol(flu)))
+
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. GENERAL HELPERS  (unchanged from v3)
+# 2. GENERAL HELPERS  (unchanged, plus assert_weekly_grid)
 # ══════════════════════════════════════════════════════════════════════════════
 
 safe_log <- function(x) log(pmax(x, 0) + 1)
@@ -245,14 +429,46 @@ first_or <- function(x, default) {
    x[which(!is.na(x))[1]]
 }
 
+# v5.2: flu seasons run August-July; season_id is the year the season starts.
+season_id <- function(d) as.integer(year(d) - as.integer(month(d) < 8))
+
+# Median peak (in counts) of seasons that ENDED before the origin's season,
+# from data <= cutoff only. Seasons need >= 20 observed weeks to count.
+typical_season_peak <- function(df, cutoff_week) {
+   d <- df %>% filter(week <= cutoff_week, !is.na(.data[[target_var]]))
+   if (nrow(d) == 0) return(NA_real_)
+   pk <- d %>%
+      mutate(.s = season_id(week)) %>%
+      filter(.s < season_id(cutoff_week)) %>%
+      group_by(.s) %>%
+      summarise(n = n(), peak = max(.data[[target_var]]), .groups = "drop") %>%
+      filter(n >= 20)
+   if (nrow(pk) == 0) NA_real_ else median(pk$peak)
+}
+
+# LEAKAGE FIX L5: every lag()/lead() below is ROW-based. They only mean
+# "previous week" / "next week" if rows are a gap-free 7-day sequence.
+assert_weekly_grid <- function(df, where = "") {
+   if (anyDuplicated(df$week) > 0)
+      stop(where, ": duplicate weeks - a join multiplied rows.")
+   if (nrow(df) > 1 && any(as.numeric(diff(sort(df$week))) != 7))
+      stop(where, ": weeks are not a gap-free 7-day grid, so row-based lag()/",
+           "lead() would not mean previous/next week.")
+   invisible(TRUE)
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. FEATURE ENGINEERING  (unchanged from v3)
+# 3. FEATURE ENGINEERING
 # ══════════════════════════════════════════════════════════════════════════════
+
+regime_flag_vars <- c("is_fast_decline", "any_decline", "any_peak_or_decline")
 
 build_flu_features <- function(flu_df) {
    
+   flu_df <- flu_df %>% arrange(week)
+   assert_weekly_grid(flu_df, "build_flu_features")
+   
    flu_df %>%
-      arrange(week) %>%
       mutate(
          log_target = safe_log(.data[[target_var]]),
          
@@ -348,19 +564,11 @@ build_flu_features <- function(flu_df) {
       mutate(
          across(c(sd_4wk, sd_8wk, sd_12wk), ~ replace_na(.x, 0)),
          
-         slope_1wk_q25 = quantile(slope_1wk, 0.25, na.rm = TRUE),
-         
+         # Row-local, backward-looking flags: safe to compute globally
          is_post_peak = if_else(
             weeks_since_12wk_peak >= 1 &
                log_target < max_12wk &
                slope_1wk < 0,
-            1, 0
-         ),
-         
-         is_fast_decline = if_else(
-            slope_1wk < slope_1wk_q25 &
-               slope_2wk < 0 &
-               drop_from_12wk_peak < 0,
             1, 0
          ),
          
@@ -369,45 +577,75 @@ build_flu_features <- function(flu_df) {
                (accel_2wk <= 0 | slope_1wk <= 0.05)
          ),
          
-         any_decline = as.integer(
-            is_fast_decline == 1 |
-               is_post_peak == 1 |
-               decline_persistence_2wk == 1
+         # Quantile-dependent flags: deliberately NA here (see L3)
+         is_fast_decline     = NA_real_,
+         any_decline         = NA_integer_,
+         any_peak_or_decline = NA_integer_
+      )
+}
+
+label_cols_for_h <- function(h) {
+   paste0(c("future_log_h", "future_value_h", "future_change_h"), h)
+}
+peak_label_cols <- c("future_peak_offset_4wk",
+                     "peak_by_1wk", "peak_by_2wk", "peak_by_3wk", "peak_by_4wk")
+
+# Future labels. Built on the full series, but they never reach a model
+# directly: make_origin_view() masks every label whose date is after the origin.
+add_future_labels <- function(ff) {
+   ff <- ff %>% arrange(week)
+   assert_weekly_grid(ff, "add_future_labels")
+   for (h in horizons) {
+      ff[[paste0("future_log_h", h)]]    <- lead(ff$log_target, h + 1)
+      ff[[paste0("future_value_h", h)]]  <- lead(ff[[target_var]], h + 1)
+      ff[[paste0("future_change_h", h)]] <- ff[[paste0("future_log_h", h)]] - ff$log_target
+   }
+   ff %>%
+      mutate(
+         future_peak_offset_4wk = slide_int(
+            log_target, future_peak_offset_fun,
+            .before = 0, .after = 4, .complete = TRUE
          ),
-         
-         any_peak_or_decline = as.integer(
-            is_near_peak == 1 | any_decline == 1
-         )
-      ) %>%
-      dplyr::select(-slope_1wk_q25)
+         peak_by_1wk = as.integer(!is.na(future_peak_offset_4wk) & future_peak_offset_4wk <= 1),
+         peak_by_2wk = as.integer(!is.na(future_peak_offset_4wk) & future_peak_offset_4wk <= 2),
+         peak_by_3wk = as.integer(!is.na(future_peak_offset_4wk) & future_peak_offset_4wk <= 3),
+         peak_by_4wk = as.integer(!is.na(future_peak_offset_4wk) & future_peak_offset_4wk <= 4)
+      )
 }
 
-flu_features <- build_flu_features(flu)
+build_all_features <- function(flu_df) add_future_labels(build_flu_features(flu_df))
 
-# Future labels — only used in training, not in recursive forecast rows
-for (h in horizons) {
-   flu_features[[paste0("future_log_h", h)]] <-
-      lead(flu_features$log_target, h + 1)
-   flu_features[[paste0("future_value_h", h)]] <-
-      lead(flu_features[[target_var]], h + 1)
-   flu_features[[paste0("future_change_h", h)]] <-
-      flu_features[[paste0("future_log_h", h)]] - flu_features$log_target
+flu_features <- build_all_features(flu)
+
+# v5.2 POOL_STATES: features and labels for every pooled state, each built on
+# its own weekly grid. Never used directly: make_pool_view() truncates and
+# masks them per origin exactly like make_origin_view() does for SC.
+build_pool_features <- function(lst) {
+   if (length(lst) == 0) return(NULL)
+   bind_rows(lapply(lst, build_all_features))
 }
+pool_features <- if (POOL_STATES) build_pool_features(pool_flu_list) else NULL
 
-flu_features <- flu_features %>%
-   mutate(
-      future_peak_offset_4wk = slide_int(
-         log_target, future_peak_offset_fun,
-         .before = 0, .after = 4, .complete = TRUE
-      ),
-      peak_by_1wk = as.integer(!is.na(future_peak_offset_4wk) & future_peak_offset_4wk <= 1),
-      peak_by_2wk = as.integer(!is.na(future_peak_offset_4wk) & future_peak_offset_4wk <= 2),
-      peak_by_3wk = as.integer(!is.na(future_peak_offset_4wk) & future_peak_offset_4wk <= 3),
-      peak_by_4wk = as.integer(!is.na(future_peak_offset_4wk) & future_peak_offset_4wk <= 4)
-   )
+# LEAKAGE FIX L5: set every label that would only be known AFTER the origin to
+# NA. Date-based (week + 7*(h+1)), so it holds even if a filter elsewhere is
+# wrong. future_peak_offset_4wk looks at weeks t..t+4, so it needs week+28.
+mask_future_labels <- function(df, origin_week) {
+   origin_week <- as.Date(origin_week)
+   for (h in horizons) {
+      unknown <- df$week + 7 * (h + 1) > origin_week
+      for (col in label_cols_for_h(h)) {
+         if (col %in% names(df)) df[[col]][unknown] <- NA
+      }
+   }
+   unknown_peak <- df$week + 28 > origin_week
+   for (col in peak_label_cols) {
+      if (col %in% names(df)) df[[col]][unknown_peak] <- NA
+   }
+   df
+}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. PREDICTOR SETS AND PHASE LABELS  (unchanged from v3)
+# 4. PREDICTOR SETS AND PHASE LABELS
 # ══════════════════════════════════════════════════════════════════════════════
 
 predictors <- c(
@@ -433,6 +671,13 @@ predictors <- c(
    "sin52", "cos52", "is_christmas", "is_newyear"
 )
 
+# External predictors (empty in v4; pct_states_rising in v5). Deliberately NOT
+# added to state_vars, which drive analog matching.
+predictors <- c(predictors, ext_vars)
+
+cat(sprintf("[model] predictors: %d (%d external)\n",
+            length(predictors), length(ext_vars)))
+
 state_vars <- c(
    "log_target", "lag1",
    "slope_1wk", "slope_2wk", "slope_3wk", "slope_4wk",
@@ -455,17 +700,22 @@ state_vars <- c(
    "week_of_year", "sin52", "cos52"
 )
 
+# Columns that must be non-NA for a week to be usable as an origin, excluding
+# the per-origin flags (which are NA in the global flu_features by design).
+origin_ready_vars <- setdiff(union(predictors, state_vars), regime_flag_vars)
+
 # ══════════════════════════════════════════════════════════════════════════════
-# THRESHOLD FUNCTIONS — fully origin-aware, no temporal leakage
+# THRESHOLDS, REGIME FLAGS, PHASE, AND THE ORIGIN VIEW
 #
-# compute_origin_thresholds(df, cutoff_week):
-#   Computes slope_cut, accel_cut, vol_cut, slope_q25, global_slope_sd
-#   from df rows where week <= cutoff_week only.
-#   Call with cutoff_week = origin_week inside every loop iteration.
-#
-# assign_phase(df, thr):
-#   Applies phase labels using the thresholds in thr (a named list).
-#   Never closes over global variables — fully explicit.
+#  make_origin_view(features_df, origin_week) is the ONLY way data reaches a
+#  model, a threshold, an analog pool or a forecast. It:
+#    1. drops every row after origin_week
+#    2. masks every label column dated after origin_week
+#    3. computes thresholds from what is left
+#    4. fills the quantile-dependent regime flags with those thresholds
+#    5. assigns phase with those thresholds
+#  flu_features itself carries NO phase and NO regime flags, so nothing can
+#  silently use a full-sample version of them.
 # ══════════════════════════════════════════════════════════════════════════════
 
 compute_origin_thresholds <- function(df, cutoff_week) {
@@ -479,10 +729,79 @@ compute_origin_thresholds <- function(df, cutoff_week) {
    list(
       slope_cut         = slope_sd * 0.25,
       accel_cut         = accel_sd * 0.25,
-      vol_cut           = quantile(past$sd_4wk,    0.70, na.rm = TRUE),
-      slope_q25         = quantile(past$slope_1wk, 0.25, na.rm = TRUE),
-      global_slope_sd   = if (is.na(slope_sd) || slope_sd <= 0) 1 else slope_sd
+      vol_cut           = quantile(past$sd_4wk,    0.70, na.rm = TRUE, names = FALSE),
+      slope_q25         = quantile(past$slope_1wk, 0.25, na.rm = TRUE, names = FALSE),
+      global_slope_sd   = if (is.na(slope_sd) || slope_sd <= 0) 1 else slope_sd,
+      # v5.1 PEAK_PULL inputs, origin-specific like everything else here
+      post_peak_decline = {
+         pp <- past$slope_1wk[!is.na(past$is_post_peak) & past$is_post_peak == 1 &
+                                 past$slope_1wk < 0]
+         if (length(pp) >= 5) median(-pp) else 0.15
+      },
+      high_level_cut    = quantile(past$log_target, 0.60, na.rm = TRUE, names = FALSE),
+      # v5.2 SEASON_GATE input
+      typical_peak      = typical_season_peak(df, cutoff_week)
    )
+}
+
+# LEAKAGE FIX L3: origin-specific version of the flags the original computed
+# with a full-sample quantile.
+assign_regime_flags <- function(df, thr, typical_peak = NULL) {
+   q25 <- thr$slope_q25
+   if (!SEASON_GATE) {
+      return(df %>%
+                mutate(
+                   season_gate = 1L,
+                   is_fast_decline = if_else(
+                      slope_1wk < q25 & slope_2wk < 0 & drop_from_12wk_peak < 0, 1, 0),
+                   any_decline = as.integer(
+                      is_fast_decline == 1 | is_post_peak == 1 | decline_persistence_2wk == 1),
+                   any_peak_or_decline = as.integer(is_near_peak == 1 | any_decline == 1)
+                ))
+   }
+   # v5.2 SEASON_GATE: peak/decline labels only where the 8-week maximum is at
+   # least SEASON_GATE_FRAC x the typical season peak (origin-specific; a
+   # vector when pooled rows carry their own state's typical peak). Unknown
+   # typical peak -> gate passes (= v5.1 behaviour).
+   tp <- if (is.null(typical_peak)) rep(thr$typical_peak, nrow(df)) else typical_peak
+   recent_max <- exp(df$max_8wk) - 1
+   gate <- is.na(tp) | (!is.na(recent_max) & recent_max >= SEASON_GATE_FRAC * tp)
+   df %>%
+      mutate(
+         season_gate  = as.integer(gate),
+         is_near_peak = as.integer(ifelse(gate, is_near_peak, 0L)),
+         is_post_peak = as.numeric(ifelse(gate, is_post_peak, 0)),
+         is_fast_decline = if_else(
+            gate & slope_1wk < q25 & slope_2wk < 0 & drop_from_12wk_peak < 0, 1, 0),
+         any_decline = as.integer(
+            is_fast_decline == 1 | is_post_peak == 1 |
+               (gate & decline_persistence_2wk == 1)),
+         any_peak_or_decline = as.integer(is_near_peak == 1 | any_decline == 1)
+      )
+}
+
+# v5.2 POOL_STATES: per-origin view of the pooled states. Same rules as
+# make_origin_view(): rows <= origin, labels dated after the origin masked,
+# flags from origin thresholds (SC's), typical peak per state.
+make_pool_view <- function(pool_df, origin_week, thr) {
+   origin_week <- as.Date(origin_week)
+   p <- pool_df %>% filter(week <= origin_week)
+   if (nrow(p) == 0) return(NULL)
+   p <- mask_future_labels(p, origin_week)
+   tp <- NULL
+   if (SEASON_GATE) {
+      tpt <- p %>%
+         filter(!is.na(.data[[target_var]])) %>%
+         mutate(.s = season_id(week)) %>%
+         filter(.s < season_id(origin_week)) %>%
+         group_by(pool_geo, .s) %>%
+         summarise(n = n(), peak = max(.data[[target_var]]), .groups = "drop") %>%
+         filter(n >= 20) %>%
+         group_by(pool_geo) %>%
+         summarise(tp = median(peak), .groups = "drop")
+      tp <- tpt$tp[match(p$pool_geo, tpt$pool_geo)]
+   }
+   assign_regime_flags(p, thr, typical_peak = tp)
 }
 
 assign_phase <- function(df, thr) {
@@ -507,23 +826,25 @@ assign_phase <- function(df, thr) {
       )
 }
 
-# For the FINAL forecast and for initial flu_features construction,
-# use all data up to the latest observed week (set after data load).
-# This placeholder is overwritten after latest_observed_week is known.
-# All retrospective/tuning loops call compute_origin_thresholds() per origin.
-.initial_thr <- compute_origin_thresholds(
-   build_flu_features(flu),
-   max(flu$week, na.rm = TRUE)
-)
+make_origin_view <- function(features_df, origin_week) {
+   origin_week <- as.Date(origin_week)
+   past <- features_df %>%
+      filter(week <= origin_week) %>%
+      arrange(week)
+   if (nrow(past) == 0 || max(past$week) != origin_week) return(NULL)
+   past <- mask_future_labels(past, origin_week)
+   thr  <- compute_origin_thresholds(past, origin_week)
+   past <- past %>%
+      assign_regime_flags(thr) %>%
+      assign_phase(thr)
+   list(df = past, thr = thr)
+}
 
-flu_features <- assign_phase(flu_features, .initial_thr)
-
-# Expose global_slope_sd for functions that reference it —
-# will be overridden per-origin inside all loops.
-global_slope_sd <- .initial_thr$global_slope_sd
+# NOTE: there is intentionally no global `global_slope_sd` and no global phase
+# assignment on flu_features (original L2 / L4). Any stray reference errors.
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. QR MODEL HELPERS  (unchanged from v3)
+# 5. QR MODEL HELPERS  (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 prepare_qr_design <- function(model_df, target_h, candidate_predictors) {
@@ -548,16 +869,14 @@ prepare_qr_design <- function(model_df, target_h, candidate_predictors) {
    list(data = model_df, predictors = keep_predictors)
 }
 
-# v4 NOTE: We keep H0 as the only directly fitted horizon.
-# H1/H2/H3 use the same H0 QR model applied to the recursively updated row.
-# We still allow fitting per-horizon QR for the residual/interval distribution,
-# but the median forecast comes from recursive application of the H0 model.
-fit_qr_model <- function(train_data, h, tau_value = 0.5) {
+# H0 is the only model used for the median; H1/H2/H3 apply it to the
+# recursively updated row. Per-horizon fits are kept only for residuals.
+fit_qr_model <- function(train_data, h, tau_value = 0.5, candidate = predictors) {
    target_h <- paste0("future_log_h", h)
    prepared <- prepare_qr_design(
       model_df = train_data,
       target_h = target_h,
-      candidate_predictors = predictors
+      candidate_predictors = candidate
    )
    model <- rq(
       as.formula(paste(target_h, "~", paste(prepared$predictors, collapse = " + "))),
@@ -573,6 +892,89 @@ predict_qr_safe <- function(model, newdata) {
 
 get_label_known_training <- function(df, label_cutoff_week, h) {
    df %>% filter(week + weeks(h + 1) <= label_cutoff_week)
+}
+
+# ── v5.1 EHR_MODE = "model": 1-step models for the Prisma series ────────────
+# Each series s gets a median regression of s(t+1) on its own level and
+# 1-week change plus the CDC state (log_target, slopes) and season. Fitted on
+# the origin view only: training rows need week + 7 <= origin, and lead()
+# inside the truncated view is NA at the origin row anyway.
+EHR_SERIES      <- c("log_hosp", "log_positive_tests", "log_tests")
+EHR_FORMULA_RHS <- "lvl + d1 + log_target + slope_1wk + slope_2wk + sin52 + cos52"
+
+fit_ehr_models <- function(view_df, origin_week) {
+   out <- list()
+   for (s in EHR_SERIES) {
+      d <- view_df %>%
+         arrange(week) %>%
+         transmute(week,
+                   lvl = .data[[s]],
+                   d1  = .data[[s]] - lag(.data[[s]]),
+                   y   = lead(.data[[s]]),
+                   log_target, slope_1wk, slope_2wk, sin52, cos52) %>%
+         filter(week + 7 <= origin_week) %>%
+         drop_na()
+      if (nrow(d) < 40) next
+      fit <- tryCatch(
+         suppressWarnings(rq(as.formula(paste("y ~", EHR_FORMULA_RHS)),
+                             tau = 0.5, data = d, method = "br")),
+         error = function(e) NULL)
+      if (!is.null(fit)) {
+         attr(fit, "y_range") <- range(d$y)
+         out[[s]] <- fit
+      }
+   }
+   out
+}
+
+# Next-week value of each modelled series, from the current (possibly
+# synthetic) row. Clamped to the training range +/- 0.5 log units so a
+# recursion can never run away. Series without a model are simply absent,
+# which append_forecast_row() treats as frozen.
+predict_ehr_next <- function(ehr_models, working_df, current_row) {
+   if (is.null(ehr_models) || length(ehr_models) == 0) return(NULL)
+   n   <- nrow(working_df)
+   res <- list()
+   for (s in names(ehr_models)) {
+      lvl  <- current_row[[s]]
+      prev <- if (n >= 2) working_df[[s]][n - 1] else NA_real_
+      nd <- tibble(lvl = lvl, d1 = lvl - prev,
+                   log_target = current_row$log_target,
+                   slope_1wk  = current_row$slope_1wk,
+                   slope_2wk  = current_row$slope_2wk,
+                   sin52 = current_row$sin52, cos52 = current_row$cos52)
+      p <- tryCatch(as.numeric(predict(ehr_models[[s]], newdata = nd)),
+                    error = function(e) NA_real_)
+      if (length(p) != 1 || is.na(p)) next
+      r <- attr(ehr_models[[s]], "y_range")
+      res[[s]] <- min(max(p, r[1] - 0.5), r[2] + 0.5)
+   }
+   res
+}
+
+# v5.2 POOL_STATES: direct H0-H3 models on SC + all pooled states. Prisma
+# predictors are dropped (other states have none).
+EHR_PREDICTORS  <- c("log_tests", "log_positive_tests", "log_hosp",
+                     "hosp_slope_1wk", "hosp_slope_2wk",
+                     "pos_slope_1wk", "pos_slope_2wk", "ehr_decline_confirmed")
+predictors_pool <- setdiff(predictors, EHR_PREDICTORS)
+
+fit_pool_models <- function(view, origin_week, pool_df) {
+   if (is.null(pool_df)) return(NULL)
+   pv <- make_pool_view(pool_df, origin_week, view$thr)
+   if (is.null(pv)) return(NULL)
+   train_all <- bind_rows(view$df %>% mutate(pool_geo = .target_key), pv)
+   out <- list()
+   for (h in horizons) {
+      target_h <- paste0("future_log_h", h)
+      md <- get_label_known_training(train_all, origin_week, h) %>%
+         drop_na(all_of(c(target_h, predictors_pool)))
+      if (nrow(md) < 80) next
+      fit_h <- tryCatch(fit_qr_model(md, h, tau_value = 0.5, candidate = predictors_pool),
+                        error = function(e) NULL)
+      if (!is.null(fit_h)) out[[paste0("h", h)]] <- fit_h
+   }
+   out
 }
 
 fit_all_qr_models <- function(df, label_cutoff_week) {
@@ -597,7 +999,7 @@ fit_all_qr_models <- function(df, label_cutoff_week) {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. ANALOG HELPERS  (unchanged from v3)
+# 6. ANALOG HELPERS  (unchanged except decline_analog_quantile_v4)
 # ══════════════════════════════════════════════════════════════════════════════
 
 phase_gate_pool <- function(pool_complete, origin_row, min_n = 10) {
@@ -727,8 +1129,7 @@ analog_peak_probs <- function(selected_analogs) {
 }
 
 decline_qr_floor_v4 <- function(row) {
-   # Now a CEILING on QR weight during peak/decline phases
-   # so analogs (which know trajectory) get more influence.
+   # CEILING on QR weight during peak/decline phases so analogs get more say.
    case_when(
       row$is_fast_decline == 1 ~ 0.30,
       row$is_near_peak == 1 & row$any_decline == 1 ~ 0.35,
@@ -753,9 +1154,15 @@ interval_scale_by_phase_v4 <- function(phase) {
    )
 }
 
-decline_analog_quantile_v4 <- function(row, h, peak_probs_row) {
+# LEAKAGE FIX L2: slope_sd is now an explicit argument. The original read a
+# top-level `global_slope_sd`; the "local override" inside forecast_origin_v4
+# never reached this function because R scopes lexically, so tuning used the
+# all-data value and the backtest used the value through the latest week.
+decline_analog_quantile_v4 <- function(row, h, peak_probs_row, slope_sd) {
+   if (missing(slope_sd) || length(slope_sd) != 1 || is.na(slope_sd))
+      stop("decline_analog_quantile_v4(): pass the origin-specific slope_sd (thr$global_slope_sd).")
    slope <- row$slope_1wk
-   slope_severity <- pmin(abs(pmin(slope, 0)) / (global_slope_sd + 1e-8), 2) / 2
+   slope_severity <- pmin(abs(pmin(slope, 0)) / (slope_sd + 1e-8), 2) / 2
    p2 <- first_or(peak_probs_row$prob_peak_by_2, 0)
    p3 <- first_or(peak_probs_row$prob_peak_by_3, 0)
    peak_risk <- max(p2, p3, na.rm = TRUE)
@@ -767,62 +1174,64 @@ decline_analog_quantile_v4 <- function(row, h, peak_probs_row) {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. v4 CORE: RECURSIVE ROW EXTENSION
-#
-#  These two functions are the heart of v4.
-#  After forecasting H0, we "append" a synthetic row to the feature dataframe
-#  with the predicted log_target, then recompute all rolling/lag features
-#  for that row so H1 sees an updated state vector.
+# 7. RECURSIVE ROW EXTENSION
 # ══════════════════════════════════════════════════════════════════════════════
 
-#' Append a synthetic forecast row to flu_features.
-#'
-#' @param df          Current flu_features dataframe (up to latest observed week).
-#' @param new_week    Date of the new synthetic row (origin_week + (h+1) weeks).
-#' @param pred_log    Predicted log_target for the new row.
-#' @param origin_row  The row at the forecast origin (for EHR carry-forward).
-#' @return df with one new row appended, all features recomputed.
-append_forecast_row <- function(df, new_week, pred_log, origin_row, thr) {
-   # ── Strategy ──────────────────────────────────────────────────────────────
-   # df is the full working_df, which already has ALL columns including future
-   # labels, phase, peak flags, etc.
-   #
-   # We CANNOT rebuild from raw flu columns because build_flu_features() does
-   # not produce future labels (future_log_h0, future_change_h0, …) — those
-   # are added separately via lead() in the main script.  Rebuilding from
-   # scratch produces a df where those columns are all NA, which kills the
-   # analog pool drop_na at every horizon after h=0.
-   #
-   # Instead we:
-   #   1. Build a template new row by copying the last row of df (preserves
-   #      every column type and default value).
-   #   2. Overwrite only the fields that genuinely change.
-   #   3. Recompute only the lag/slope/rolling features for the new tail row
-   #      using the extended log_target vector — no full rebuild needed.
-   # ──────────────────────────────────────────────────────────────────────────
+append_forecast_row <- function(df, new_week, pred_log, origin_row, thr,
+                                ehr_next = NULL) {
+   
+   new_week <- as.Date(new_week)
+   
+   # LEAKAGE GUARD (L1): df must end exactly one week before new_week.
+   if (nrow(df) == 0 || as.numeric(new_week - max(df$week)) != 7) {
+      stop(sprintf(
+         "append_forecast_row(): new_week %s is not one week after the last row %s. ",
+         format(new_week), if (nrow(df)) format(max(df$week)) else "<empty>"),
+         "df must not contain rows after the forecast origin.")
+   }
    
    pred_count <- pmax(exp(pred_log) - 1, 0)
    
-   # Step 1: template from last observed row (all types preserved)
+   # Template from the last row (<= current week by the guard above)
    new_row <- df %>% dplyr::slice(n())
    
-   # Step 2: overwrite changing fields
    new_row$week           <- new_week
    new_row[[target_var]]  <- pred_count
    new_row$log_target     <- pred_log
    
-   # EHR carry-forward (constant = last known)
-   # log_hosp / log_positive_tests stay at origin values → slopes = 0, not NA
-   new_row$log_tests          <- origin_row$log_tests
-   new_row$log_positive_tests <- origin_row$log_positive_tests
-   new_row$log_hosp           <- origin_row$log_hosp
-   new_row$hosp_slope_1wk     <- 0
-   new_row$hosp_slope_2wk     <- 0
-   new_row$pos_slope_1wk      <- 0
-   new_row$pos_slope_2wk      <- 0
-   new_row$ehr_decline_confirmed <- origin_row$ehr_decline_confirmed
+   if (is.null(ehr_next)) {
+      # EHR carry-forward (constant = last known) -> EHR slopes 0  (v5-LP)
+      new_row$log_tests          <- origin_row$log_tests
+      new_row$log_positive_tests <- origin_row$log_positive_tests
+      new_row$log_hosp           <- origin_row$log_hosp
+      new_row$hosp_slope_1wk     <- 0
+      new_row$hosp_slope_2wk     <- 0
+      new_row$pos_slope_1wk      <- 0
+      new_row$pos_slope_2wk      <- 0
+      new_row$ehr_decline_confirmed <- origin_row$ehr_decline_confirmed
+   } else {
+      # v5.1 EHR_MODE = "model": modelled next-week values; unmodelled series
+      # stay frozen. Slopes are recomputed exactly as build_flu_features does.
+      nd <- nrow(df)
+      prev1 <- function(s) df[[s]][nd]
+      prev2 <- function(s) if (nd >= 2) df[[s]][nd - 1] else NA_real_
+      for (s in c("log_tests", "log_positive_tests", "log_hosp")) {
+         new_row[[s]] <- if (!is.null(ehr_next[[s]])) ehr_next[[s]] else origin_row[[s]]
+      }
+      new_row$hosp_slope_1wk <- new_row$log_hosp - prev1("log_hosp")
+      new_row$hosp_slope_2wk <- new_row$log_hosp - prev2("log_hosp")
+      new_row$pos_slope_1wk  <- new_row$log_positive_tests - prev1("log_positive_tests")
+      new_row$pos_slope_2wk  <- new_row$log_positive_tests - prev2("log_positive_tests")
+      new_row$ehr_decline_confirmed <- as.integer(
+         new_row$hosp_slope_1wk < 0 | new_row$pos_slope_1wk < 0 |
+            new_row$hosp_slope_2wk < 0 | new_row$pos_slope_2wk < 0)
+   }
    
-   # Seasonality from new_week date
+   # External covariates (v5) held at their origin value; unknown in future.
+   if (length(ext_vars) > 0) {
+      for (.v in ext_vars) new_row[[.v]] <- origin_row[[.v]]
+   }
+   
    woy <- isoweek(new_week)
    new_row$week_of_year <- woy
    new_row$sin52        <- sin(2 * pi * woy / 52)
@@ -831,8 +1240,7 @@ append_forecast_row <- function(df, new_week, pred_log, origin_row, thr) {
    new_row$is_christmas <- if_else(month(new_week) == 12 & day(new_week) >= 20, 1, 0)
    new_row$is_newyear   <- if_else(month(new_week) == 1  & day(new_week) <= 7,  1, 0)
    
-   # Step 3: recompute lag/slope/rolling features using the extended log_target
-   # vector (existing rows + the new predicted value).
+   # Observed history up to the origin + earlier predictions + this prediction
    log_vec <- c(df$log_target, pred_log)
    n       <- length(log_vec)
    
@@ -860,9 +1268,7 @@ append_forecast_row <- function(df, new_week, pred_log, origin_row, thr) {
    new_row$decline_persistence_3wk <- as.integer(
       new_row$slope_1wk < 0 & new_row$prev_slope_1wk < 0 & new_row$prev_slope_2wk < 0)
    
-   # Rolling windows over the extended vector
    win <- function(v, k) v[pmax(1, n - k + 1):n]
-   
    w4  <- win(log_vec, 4);  w8  <- win(log_vec, 8);  w12 <- win(log_vec, 12)
    
    new_row$mean_4wk  <- safe_mean(w4);  new_row$mean_8wk  <- safe_mean(w8)
@@ -896,53 +1302,40 @@ append_forecast_row <- function(df, new_week, pred_log, origin_row, thr) {
    new_row$recent_peak_ratio <-
       (exp(pred_log) - 1) / pmax(exp(new_row$max_8wk) - 1, 1e-6)
    
-   # Phase flags
-   # Use the precomputed training-period Q25 (not df$slope_1wk which includes
-   # eval data) to avoid leakage into is_fast_decline classification.
-   slope_1wk_q25 <- thr$slope_q25
    new_row$is_post_peak <- if_else(
       new_row$weeks_since_12wk_peak >= 1 &
          pred_log < new_row$max_12wk &
          new_row$slope_1wk < 0, 1, 0)
-   new_row$is_fast_decline <- if_else(
-      new_row$slope_1wk < slope_1wk_q25 &
-         new_row$slope_2wk < 0 &
-         new_row$drop_from_12wk_peak < 0, 1, 0)
    new_row$is_near_peak <- as.integer(
       new_row$recent_peak_ratio >= 0.80 &
          (new_row$accel_2wk <= 0 | new_row$slope_1wk <= 0.05))
-   new_row$any_decline <- as.integer(
-      new_row$is_fast_decline == 1 |
-         new_row$is_post_peak == 1 |
-         new_row$decline_persistence_2wk == 1)
-   new_row$any_peak_or_decline <- as.integer(
-      new_row$is_near_peak == 1 | new_row$any_decline == 1)
    
-   # Future labels: NA for synthetic rows (not used in analog pool — pool
-   # always draws from original df, not working_df)
+   # Labels unknown for synthetic rows
    for (h_lab in horizons) {
-      new_row[[paste0("future_log_h",    h_lab)]] <- NA_real_
-      new_row[[paste0("future_value_h",  h_lab)]] <- NA_real_
-      new_row[[paste0("future_change_h", h_lab)]] <- NA_real_
+      for (col in label_cols_for_h(h_lab)) new_row[[col]] <- NA_real_
    }
    new_row$future_peak_offset_4wk <- NA_integer_
-   for (p in c("peak_by_1wk","peak_by_2wk","peak_by_3wk","peak_by_4wk"))
+   for (p in c("peak_by_1wk", "peak_by_2wk", "peak_by_3wk", "peak_by_4wk"))
       new_row[[p]] <- NA_integer_
    
-   # Assign phase using origin-specific thresholds (no leakage)
-   new_row <- assign_phase(new_row, thr)
+   # Origin-specific regime flags and phase
+   new_row <- new_row %>%
+      assign_regime_flags(thr) %>%
+      assign_phase(thr)
    
    bind_rows(df, new_row)
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 8. v4 FORECAST ENGINE  — recursive loop
-#
-#  Replaces forecast_origin_v3().
-#  Key difference: after each horizon h, the predicted log value is appended
-#  to the working feature dataframe so that h+1 uses updated features.
-#  anti_shift_postprocess is NOT called — the recursion enforces coherence.
+# 8. FORECAST ENGINE - recursive loop
 # ══════════════════════════════════════════════════════════════════════════════
+
+# v5.1 output-stage options: direct-model weight per horizon (index h+1) and
+# the peak-pull strength. make_opts() with defaults = v5-LP behaviour.
+make_opts <- function(direct_w = rep(0, length(horizons)), peak_lambda = 0,
+                      pool_w = rep(0, length(horizons))) {
+   list(direct_w = direct_w, peak_lambda = peak_lambda, pool_w = pool_w)
+}
 
 get_tuning_row <- function(tuning_table, h) {
    row <- tuning_table %>% filter(horizon == h) %>% dplyr::slice(1)
@@ -959,24 +1352,62 @@ forecast_origin_v4 <- function(origin_week,
                                residual_df,
                                tuning_table,
                                thr,
-                               quantiles = quantiles) {
+                               quantiles,
+                               ehr_models = NULL,
+                               opts = make_opts(),
+                               pool_models = NULL) {
    
    origin_week <- as.Date(origin_week)
    
-   # working_df grows by one row after each horizon step
-   working_df <- df
-   
-   # Origin row — must be complete; used as imputation source for synthetic rows
-   origin_row_0 <- df %>%
-      filter(week == origin_week) %>%
-      drop_na(all_of(union(predictors, state_vars)))
-   
-   if (nrow(origin_row_0) != 1) return(NULL)
+   # LEAKAGE GUARD (L1/L5): whatever the caller passed, only rows <= origin
+   # survive and no label dated after the origin is visible.
+   df <- df %>% filter(week <= origin_week) %>% arrange(week)
+   df <- mask_future_labels(df, origin_week)
+   if (nrow(df) == 0 || max(df$week) != origin_week) return(NULL)
+   if (!"phase" %in% names(df) || all(is.na(df$is_fast_decline))) {
+      stop("forecast_origin_v4(): df must come from make_origin_view().")
+   }
    
    required_cols <- union(predictors, state_vars)
    
+   origin_row_0 <- df %>%
+      dplyr::slice(n()) %>%
+      drop_na(all_of(required_cols))
+   if (nrow(origin_row_0) != 1) return(NULL)
+   
    model_h0 <- qr_models[["h0"]]
    if (is.null(model_h0)) return(NULL)
+   
+   # Analog pool: past rows whose one-week-ahead change was known by the origin.
+   # Built once from the past-only df; identical for every horizon.
+   change_col  <- "future_change_h0"
+   analog_pool <- get_label_known_training(df, origin_week, h = 0) %>%
+      drop_na(all_of(c(state_vars, change_col)))
+   
+   working_df <- df
+   
+   # v5.1 DIRECT_BLEND: direct H1-H3 predictions from the REAL origin row
+   dir_vec <- rep(NA_real_, length(horizons))
+   for (hh in horizons[horizons >= 1]) {
+      m_h <- qr_models[[paste0("h", hh)]]
+      if (!is.null(m_h)) {
+         dir_vec[hh + 1] <- tryCatch(predict_qr_safe(m_h, origin_row_0),
+                                     error = function(e) NA_real_)
+      }
+   }
+   # v5.2 POOL_STATES: pooled direct H0-H3 predictions from the REAL origin row
+   pool_vec <- rep(NA_real_, length(horizons))
+   if (!is.null(pool_models)) {
+      for (hh in horizons) {
+         m_p <- pool_models[[paste0("h", hh)]]
+         if (!is.null(m_p)) {
+            pool_vec[hh + 1] <- tryCatch(predict_qr_safe(m_p, origin_row_0),
+                                         error = function(e) NA_real_)
+         }
+      }
+   }
+   # v5.1 PEAK_PULL: P(K <= k), k = 0..3, from the origin's analogs (set at h = 0)
+   origin_peak_cdf <- rep(0, 4)
    
    median_rows          <- list()
    quantile_error_store <- list()
@@ -984,35 +1415,26 @@ forecast_origin_v4 <- function(origin_week,
    
    for (h in horizons) {
       
-      # The row we forecast FROM is origin_week + h weeks.
-      # After h=0, that row is the synthetic one we appended.
       current_week_for_h <- origin_week + weeks(h)
       target_end_date_h  <- origin_week + weeks(h + 1)
       
-      # ── 1. Get the current feature row ────────────────────────────────────
-      current_row_raw <- working_df %>% filter(week == current_week_for_h)
-      
-      if (nrow(current_row_raw) < 1) {
-         # Row missing — append carry-forward so cascade continues
-         cat(sprintf("  [v4] h=%d: current row not found, carry-forward\n", h))
-         last_log <- working_df$log_target[nrow(working_df)]
-         working_df <- append_forecast_row(working_df, target_end_date_h,
-                                           last_log, origin_row_0, thr)
-         next
+      # ── 1. Current feature row: ALWAYS the last row of working_df ─────────
+      # (The original filtered by week and took slice(1). With future rows in
+      # df that returned the REAL observed row, not the synthetic one.)
+      if (max(working_df$week) != current_week_for_h) {
+         stop(sprintf("forecast_origin_v4(): expected last row %s at h=%d, found %s.",
+                      format(current_week_for_h), h, format(max(working_df$week))))
       }
-      
-      current_row_raw <- current_row_raw %>% dplyr::slice(1)
+      current_row_raw <- working_df %>% dplyr::slice(n())
       
       # For synthetic rows: impute any NAs from origin_row_0
       if (h > 0) {
          na_cols <- required_cols[sapply(required_cols, function(v) {
             v %in% names(current_row_raw) && is.na(current_row_raw[[v]][1])
          })]
-         if (length(na_cols) > 0) {
-            for (col in na_cols) {
-               if (col %in% names(origin_row_0))
-                  current_row_raw[[col]] <- origin_row_0[[col]]
-            }
+         for (col in na_cols) {
+            if (col %in% names(origin_row_0))
+               current_row_raw[[col]] <- origin_row_0[[col]]
          }
       }
       
@@ -1021,8 +1443,8 @@ forecast_origin_v4 <- function(origin_week,
       })]
       
       if (length(still_na) > 0) {
-         cat(sprintf("  [v4] h=%d: %d NAs remain after imputation (%s) — carry-forward\n",
-                     h, length(still_na), paste(head(still_na, 3), collapse=",")))
+         cat(sprintf("  [v4] h=%d: %d NAs remain after imputation (%s) - carry-forward\n",
+                     h, length(still_na), paste(head(still_na, 3), collapse = ",")))
          last_log <- working_df$log_target[nrow(working_df)]
          working_df <- append_forecast_row(working_df, target_end_date_h,
                                            last_log, origin_row_0, thr)
@@ -1037,11 +1459,9 @@ forecast_origin_v4 <- function(origin_week,
       bandwidth_h  <- tune_h$bandwidth
       blend_qr_raw <- tune_h$blend_qr
       
-      # Use origin-specific global_slope_sd from thr
-      global_slope_sd <- thr$global_slope_sd
-      qr_limit     <- decline_qr_floor_v4(current_row)
+      qr_limit      <- decline_qr_floor_v4(current_row)
       decline_phase <- is_one(current_row$any_peak_or_decline)
-      blend_qr_h   <- if (decline_phase) min(blend_qr_raw, qr_limit) else
+      blend_qr_h    <- if (decline_phase) min(blend_qr_raw, qr_limit) else
          max(blend_qr_raw, qr_limit)
       blend_analog_h <- 1 - blend_qr_h
       
@@ -1052,7 +1472,7 @@ forecast_origin_v4 <- function(origin_week,
       )
       
       if (is.na(qr_median_log)) {
-         cat(sprintf("  [v4] h=%d: QR predict failed — carry-forward\n", h))
+         cat(sprintf("  [v4] h=%d: QR predict failed - carry-forward\n", h))
          last_log <- current_row$log_target
          working_df <- append_forecast_row(working_df, target_end_date_h,
                                            last_log, current_row, thr)
@@ -1060,18 +1480,6 @@ forecast_origin_v4 <- function(origin_week,
       }
       
       # ── 4. Analog selection ───────────────────────────────────────────────
-      change_col <- "future_change_h0"
-      
-      # Use origin_week as cutoff so pool size stays constant across horizons
-      analog_pool <- get_label_known_training(df, origin_week, h = 0) %>%
-         mutate(
-            future_peak_offset_4wk = if_else(
-               week + weeks(4) <= origin_week,
-               future_peak_offset_4wk, NA_integer_
-            )
-         ) %>%
-         drop_na(all_of(c(state_vars, change_col)))
-      
       selected_analogs <- get_analogs_v4(
          origin_row  = current_row,
          analog_pool = analog_pool,
@@ -1083,8 +1491,16 @@ forecast_origin_v4 <- function(origin_week,
       
       use_analog <- nrow(selected_analogs) >= 5
       if (!use_analog)
-         cat(sprintf("  [v4] h=%d: only %d analogs — QR-only fallback\n",
+         cat(sprintf("  [v4] h=%d: only %d analogs - QR-only fallback\n",
                      h, nrow(selected_analogs)))
+      
+      if (h == 0 && use_analog) {
+         origin_peak_cdf <- vapply(0:3, function(k) {
+            v <- weighted_mean_safe(selected_analogs$future_peak_offset_4wk <= k,
+                                    selected_analogs$analog_weight)
+            if (is.na(v)) 0 else v
+         }, numeric(1))
+      }
       
       # ── 5. Median forecast ────────────────────────────────────────────────
       peak_probs_h <- if (use_analog) {
@@ -1096,7 +1512,8 @@ forecast_origin_v4 <- function(origin_week,
       
       if (use_analog) {
          analog_change <- if (is_one(current_row$any_peak_or_decline)) {
-            dq <- decline_analog_quantile_v4(current_row, h, peak_probs_h)
+            dq <- decline_analog_quantile_v4(current_row, h, peak_probs_h,
+                                             slope_sd = thr$global_slope_sd)
             weighted_quantile_safe(selected_analogs[[change_col]],
                                    selected_analogs$analog_weight, dq)[1]
          } else {
@@ -1187,13 +1604,18 @@ forecast_origin_v4 <- function(origin_week,
          tibble(origin_week = origin_week, horizon = h)
       }
       
-      # ── 8. Extend working_df — ALWAYS, no matter what happened above ──────
+      # ── 8. Extend working_df with the prediction ──────────────────────────
+      ehr_next <- if (!is.null(ehr_models)) {
+         predict_ehr_next(ehr_models, working_df, current_row)
+      } else NULL
+      
       working_df <- append_forecast_row(
          df         = working_df,
          new_week   = target_end_date_h,
          pred_log   = raw_combined_log,
          origin_row = current_row,
-         thr        = thr
+         thr        = thr,
+         ehr_next   = ehr_next
       )
       
       cat(sprintf("  [v4] h=%d done: pred_log=%.3f  phase=%s  use_analog=%s\n",
@@ -1203,6 +1625,33 @@ forecast_origin_v4 <- function(origin_week,
    median_df <- bind_rows(median_rows)
    if (nrow(median_df) == 0) return(NULL)
    
+   # ── v5.1 output stage: direct blend and peak pull ──────────────────────
+   # The recursion above is untouched (rec_log). Final median for h >= 1:
+   #   (1 - w_h) * rec + w_h * direct  -  lambda * E[weeks past peak] * decline
+   # With make_opts() defaults this equals rec_log exactly (v5-LP).
+   in_season <- if (SEASON_GATE) {
+      isTRUE(origin_row_0$season_gate == 1)          # v5.2: season-relative
+   } else {
+      isTRUE(origin_row_0$log_target >= thr$high_level_cut)
+   }
+   pull_unit_vec <- vapply(horizons, function(hh) {
+      if (hh >= 1 && in_season) sum(origin_peak_cdf[seq_len(hh + 1)]) * thr$post_peak_decline else 0
+   }, numeric(1))
+   
+   median_df <- median_df %>%
+      mutate(
+         rec_log   = raw_corrected_log,
+         dir_log   = dir_vec[horizon + 1],
+         pull_unit = pull_unit_vec[horizon + 1],
+         w_direct  = opts$direct_w[horizon + 1],
+         pool_log  = pool_vec[horizon + 1],
+         w_pool    = opts$pool_w[horizon + 1],
+         final_log = pmax((1 - w_direct - w_pool) * rec_log +
+                             w_direct * coalesce(dir_log, rec_log) +
+                             w_pool * coalesce(pool_log, rec_log) -
+                             opts$peak_lambda * pull_unit, 0)
+      )
+   
    error_df <- bind_rows(quantile_error_store)
    
    all_quantiles <- median_df %>%
@@ -1210,6 +1659,7 @@ forecast_origin_v4 <- function(origin_week,
          origin_week, target_end_date, horizon, phase,
          final_log, raw_corrected_log, qr_median_log, analog_target_log,
          blend_qr_raw, blend_qr, blend_analog, k, bandwidth,
+         rec_log, dir_log, pull_unit, w_direct, pool_log, w_pool,
          starts_with("prob_peak_by_")
       ) %>%
       left_join(error_df, by = "horizon") %>%
@@ -1229,22 +1679,30 @@ forecast_origin_v4 <- function(origin_week,
    )
 }
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-# 9. ROLLING VALIDATION / TUNING
-#    v4 change: tune only for h=0 (1-step), since all horizons use the H0 model
-#    recursively. k, bandwidth, blend_qr from h=0 tuning are reused for h1-3
-#    with minor horizon-indexed adjustments.
+# 9. ROLLING VALIDATION / TUNING  (h=0, reused recursively for all horizons)
+#
+#  Every origin now goes through make_origin_view(): QR training rows, the
+#  origin row, AND the analog pool all come from the past-only view (the
+#  original drew the pool from the globally phase-labelled flu_features).
 # ══════════════════════════════════════════════════════════════════════════════
 
 validation_origins <- flu_features %>%
    filter(week >= train_cut, week < valid_end, !is.na(log_target)) %>%
-   drop_na(all_of(c(predictors, state_vars))) %>%
+   drop_na(all_of(origin_ready_vars)) %>%
    pull(week)
 
-tune_results <- list()
+if (length(validation_origins) == 0) stop("No validation origins in [train_cut, valid_end).")
 
-cat("\nTuning h=0 (1-step) — used recursively for all horizons ...\n")
+# The tuning labels (origin + 1 week) must all precede the evaluation window,
+# otherwise hyperparameters are chosen with evaluation-period outcomes.
+if (max(validation_origins) + weeks(1) >= eval_start) {
+   stop("Tuning window overlaps evaluation: last tuning label ",
+        format(max(validation_origins) + weeks(1)),
+        " is not before eval_start ", format(eval_start), ".")
+}
+
+cat("\nTuning h=0 (1-step) - used recursively for all horizons ...\n")
 
 pred_store <- list()
 change_col <- "future_change_h0"
@@ -1253,23 +1711,19 @@ target_h   <- "future_log_h0"
 for (origin_week in validation_origins) {
    origin_week <- as.Date(origin_week)
    
-   # Compute thresholds strictly from data <= origin_week (no future leakage)
-   thr_tune <- compute_origin_thresholds(flu_features, origin_week)
+   view_tune <- make_origin_view(flu_features, origin_week)
+   if (is.null(view_tune)) next
+   ov       <- view_tune$df
+   thr_tune <- view_tune$thr
    
-   # Rebuild features and phase labels for this origin using its own thresholds.
-   # We pass these into flu_features_at_origin so the origin_row's phase
-   # and is_fast_decline reflect only what was knowable at that time.
-   flu_features_at_origin <- flu_features %>%
-      filter(week <= origin_week) %>%
-      assign_phase(thr_tune)
-   
-   train_origin <- get_label_known_training(flu_features_at_origin, origin_week, 0) %>%
+   train_origin <- get_label_known_training(ov, origin_week, 0) %>%
       drop_na(all_of(c(target_h, predictors)))
    
-   origin_row <- flu_features_at_origin %>%
+   origin_row <- ov %>%
       filter(week == origin_week) %>%
       drop_na(all_of(c(predictors, state_vars)))
    
+   # Scoring label only - read from the unmasked series, never fed to a model.
    y_true <- flu_features %>% filter(week == origin_week) %>% pull(target_h)
    
    if (nrow(train_origin) < 80 || nrow(origin_row) != 1 ||
@@ -1287,12 +1741,7 @@ for (origin_week in validation_origins) {
    )
    if (is.na(qr_pred)) next
    
-   analog_pool <- get_label_known_training(flu_features, origin_week, 0) %>%
-      mutate(
-         future_peak_offset_4wk = if_else(
-            week + weeks(4) <= origin_week, future_peak_offset_4wk, NA_integer_
-         )
-      ) %>%
+   analog_pool <- get_label_known_training(ov, origin_week, 0) %>%
       drop_na(all_of(c(state_vars, change_col)))
    
    grid_origin <- expand_grid(k = candidate_k, bandwidth = candidate_bandwidth) %>%
@@ -1318,7 +1767,8 @@ for (origin_week in validation_origins) {
       decline_like <- is_one(origin_row$any_peak_or_decline)
       
       analog_change <- if (decline_like) {
-         dq <- decline_analog_quantile_v4(origin_row, 0, peak_probs_g)
+         dq <- decline_analog_quantile_v4(origin_row, 0, peak_probs_g,
+                                          slope_sd = thr_tune$global_slope_sd)
          weighted_quantile_safe(analogs_g[[change_col]], analogs_g$analog_weight, dq)[1]
       } else {
          weighted_median_safe(analogs_g[[change_col]], analogs_g$analog_weight)
@@ -1351,25 +1801,146 @@ if (nrow(pred_df_all) > 0) {
    best_h0 <- tibble(k = 20, bandwidth = 1.25, blend_qr = 0.50, mae_log = NA_real_, n_valid = 0)
 }
 
-# Propagate h=0 tuning to h1-3 with mild horizon penalty on blend_qr
-# (longer horizons lean slightly more on analogs since QR can't see as far)
 tuning_table <- bind_rows(lapply(horizons, function(h) {
    tibble(
       horizon   = h,
       k         = best_h0$k,
       bandwidth = best_h0$bandwidth,
-      # Slightly reduce QR weight at longer horizons
       blend_qr  = pmax(best_h0$blend_qr - h * 0.05, 0.10),
       mae_log   = best_h0$mae_log,
       n_valid   = best_h0$n_valid
    )
 }))
 
-cat("\n═══ TUNING TABLE v4 ═══\n")
+cat("\n═══ TUNING TABLE ═══\n")
 print(tuning_table)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 10. FINAL FORECAST  (same structure as v3, uses forecast_origin_v4)
+# 9b. v5.1 PIPELINE HELPERS + PATH TUNING (DIRECT_BLEND weight, PEAK_PULL lambda)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Every forecast (tuning paths, final, leakage test, backtest) goes through
+# these two functions, so all of them use identical machinery.
+fit_origin_models <- function(view, origin_week, pool_df = pool_features) {
+   m <- fit_all_qr_models(view$df, origin_week)
+   m$ehr_models  <- if (EHR_MODE == "model") fit_ehr_models(view$df, origin_week) else NULL
+   m$pool_models <- if (POOL_STATES) fit_pool_models(view, origin_week, pool_df) else NULL
+   m
+}
+
+run_forecast_at <- function(view, origin_week, opts, pool_df = pool_features) {
+   m <- fit_origin_models(view, origin_week, pool_df)
+   forecast_origin_v4(
+      origin_week  = origin_week,
+      df           = view$df,
+      qr_models    = m$qr_models,
+      residual_df  = m$residual_df,
+      tuning_table = tuning_table,
+      thr          = view$thr,
+      quantiles    = quantiles,
+      ehr_models   = m$ehr_models,
+      opts         = opts,
+      pool_models  = m$pool_models
+   )
+}
+
+opts_final   <- make_opts()
+path_tune_df <- NULL
+
+if (DIRECT_BLEND || PEAK_PULL || POOL_STATES) {
+   
+   path_origins <- validation_origins[seq(1, length(validation_origins), by = PATH_TUNE_STEP)]
+   
+   # Every path target (origin + 4 weeks at H3) must precede the eval window
+   if (max(path_origins) + weeks(max(horizons) + 1) >= eval_start) {
+      stop("Path tuning overlaps evaluation: last H3 target ",
+           format(max(path_origins) + weeks(max(horizons) + 1)),
+           " is not before eval_start ", format(eval_start), ".")
+   }
+   
+   cat(sprintf("\nPath tuning on %d validation origins (every %d) ...\n",
+               length(path_origins), PATH_TUNE_STEP))
+   
+   path_rows <- list()
+   for (o in path_origins) {
+      o <- as.Date(o)
+      v <- make_origin_view(flu_features, o)
+      if (is.null(v)) next
+      fc <- run_forecast_at(v, o, make_opts())
+      if (is.null(fc)) next
+      # Scoring labels only - read from the unmasked series after forecasting
+      truth_o <- flu_features %>% filter(week == o)
+      path_rows[[length(path_rows) + 1]] <- fc$median_df %>%
+         transmute(origin_week, horizon, rec_log, dir_log, pull_unit, pool_log,
+                   y_true = vapply(horizon, function(hh)
+                      truth_o[[paste0("future_log_h", hh)]][1], numeric(1)))
+   }
+   path_tune_df <- bind_rows(path_rows) %>% filter(!is.na(y_true))
+   
+   if (nrow(path_tune_df) == 0) {
+      cat("[v5.1] no usable validation paths - switches left at neutral values\n")
+   } else {
+      w_grid  <- if (DIRECT_BLEND) seq(0, 1, by = 0.25) else 0
+      wp_grid <- if (POOL_STATES)  seq(0, 1, by = 0.25) else 0
+      l_grid  <- if (PEAK_PULL) c(0, 0.5, 1, 1.5, 2) else 0
+      
+      # H0 has no SC direct model and no pull, so only the pool weight can
+      # change it; the tie-break below keeps H0 = recursive when pooling is off.
+      grid_scores <- path_tune_df %>%
+         crossing(w = w_grid, wp = wp_grid, lambda = l_grid) %>%
+         filter(w + wp <= 1 + 1e-9) %>%
+         mutate(
+            pred    = pmax((1 - w - wp) * rec_log +
+                              w  * coalesce(dir_log, rec_log) +
+                              wp * coalesce(pool_log, rec_log) -
+                              lambda * pull_unit, 0),
+            abs_err = abs(y_true - pred)
+         ) %>%
+         group_by(horizon, w, wp, lambda) %>%
+         summarise(mae_log = mean(abs_err), n = n(), .groups = "drop")
+      
+      # For each lambda, best (w, wp) per horizon (ties -> less blending);
+      # then the lambda with the lowest total MAE (ties -> smaller lambda).
+      best_by_lambda <- grid_scores %>%
+         group_by(lambda, horizon) %>%
+         arrange(mae_log, w + wp, w, .by_group = TRUE) %>%
+         dplyr::slice(1) %>%
+         ungroup()
+      lambda_best <- best_by_lambda %>%
+         group_by(lambda) %>%
+         summarise(total = sum(mae_log), .groups = "drop") %>%
+         arrange(total, lambda) %>%
+         dplyr::slice(1) %>%
+         pull(lambda)
+      chosen <- best_by_lambda %>% filter(lambda == lambda_best)
+      
+      w_vec  <- rep(0, length(horizons))
+      wp_vec <- rep(0, length(horizons))
+      for (i in seq_len(nrow(chosen))) {
+         w_vec[chosen$horizon[i] + 1]  <- chosen$w[i]
+         wp_vec[chosen$horizon[i] + 1] <- chosen$wp[i]
+      }
+      opts_final <- make_opts(direct_w = w_vec, peak_lambda = lambda_best, pool_w = wp_vec)
+      
+      cat("\n═══ PATH TUNING RESULT (validation MAE, log scale) ═══\n")
+      print(
+         grid_scores %>%
+            filter(w == 0, wp == 0, lambda == 0) %>%
+            dplyr::select(horizon, mae_recursive_only = mae_log, n) %>%
+            left_join(chosen %>% dplyr::select(horizon, w_direct = w, w_pool = wp,
+                                               mae_chosen = mae_log), by = "horizon") %>%
+            mutate(peak_lambda = lambda_best)
+      )
+   }
+}
+
+cat(sprintf("[v5.2] final options: direct_w = (%s) | pool_w = (%s) | peak_lambda = %.2f | EHR_MODE = %s | SEASON_GATE = %s\n",
+            paste(sprintf("%.2f", opts_final$direct_w), collapse = ", "),
+            paste(sprintf("%.2f", opts_final$pool_w), collapse = ", "),
+            opts_final$peak_lambda, EHR_MODE, SEASON_GATE))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. FINAL FORECAST
 # ══════════════════════════════════════════════════════════════════════════════
 
 latest_observed_week <- max(
@@ -1378,14 +1949,11 @@ latest_observed_week <- max(
 )
 reference_date <- latest_observed_week + weeks(1)
 
-# Compute thresholds from all data up to the latest observed week
-thr_final <- compute_origin_thresholds(flu_features, latest_observed_week)
+final_view <- make_origin_view(flu_features, latest_observed_week)
+if (is.null(final_view)) stop("Could not build the origin view for the latest observed week.")
+thr_final <- final_view$thr
 
-# Re-apply phase labels with final thresholds (updates flu_features in-place)
-flu_features <- assign_phase(flu_features, thr_final)
-global_slope_sd <- thr_final$global_slope_sd
-
-current_row <- flu_features %>%
+current_row <- final_view$df %>%
    filter(week == latest_observed_week) %>%
    drop_na(all_of(c(predictors, state_vars)))
 
@@ -1396,28 +1964,28 @@ if (nrow(current_row) != 1) {
 observed_value <- current_row[[target_var]]
 phase <- current_row$phase
 
-final_models <- fit_all_qr_models(
-   df = flu_features,
-   label_cutoff_week = latest_observed_week
-)
+final_models <- fit_origin_models(final_view, latest_observed_week)
 
 final_forecast <- forecast_origin_v4(
    origin_week  = latest_observed_week,
-   df           = flu_features,
+   df           = final_view$df,
    qr_models    = final_models$qr_models,
    residual_df  = final_models$residual_df,
    tuning_table = tuning_table,
    thr          = thr_final,
-   quantiles    = quantiles
+   quantiles    = quantiles,
+   ehr_models   = final_models$ehr_models,
+   opts         = opts_final,
+   pool_models  = final_models$pool_models
 )
 
 if (is.null(final_forecast)) {
    stop("Final forecast failed. Check model completeness and analog availability.")
 }
 
-all_quantiles       <- final_forecast$all_quantiles
+all_quantiles         <- final_forecast$all_quantiles
 analog_diagnostics_df <- final_forecast$analog_diagnostics
-median_forecast_df  <- final_forecast$median_df
+median_forecast_df    <- final_forecast$median_df
 
 cdc_submission <- all_quantiles %>%
    mutate(
@@ -1434,10 +2002,13 @@ cdc_submission <- all_quantiles %>%
    ) %>%
    arrange(horizon, output_type_id)
 
-cat("\n═══ FINAL FORECAST DIAGNOSTICS v4 ═══\n")
+cat("\n═══ FINAL FORECAST DIAGNOSTICS ═══\n")
 cat(sprintf("Latest observed week : %s\n", latest_observed_week))
 cat(sprintf("Latest observed value: %s\n", observed_value))
 cat(sprintf("Detected phase       : %s\n", phase))
+cat(sprintf("Typical season peak  : %s  | season gate at origin: %s\n",
+            if (is.na(thr_final$typical_peak)) "NA (no completed season)" else format(round(thr_final$typical_peak)),
+            if (SEASON_GATE) (if (isTRUE(current_row$season_gate == 1)) "open (in season)" else "closed (peak/decline labels off)") else "switch off"))
 
 cat("\nForecast medians:\n")
 print(
@@ -1479,7 +2050,7 @@ print(
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 11. FINAL FORECAST PLOT  (unchanged from v3)
+# 11. FINAL FORECAST PLOT  (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 plot_intervals <- cdc_submission %>%
@@ -1497,7 +2068,6 @@ hist_plot_df <- flu_features %>%
    dplyr::select(week, Observed = all_of(target_var)) %>%
    pivot_longer(cols = c(Observed), names_to = "Series", values_to = "Admissions")
 
-# Build a complete weekly sequence so no dates are dropped from x-axis
 plot_date_min <- min(hist_plot_df$week)
 plot_date_max <- max(plot_intervals$target_end_date)
 all_actual_dates <- seq(plot_date_min, plot_date_max, by = "week")
@@ -1522,17 +2092,14 @@ p_final <- ggplot() +
    scale_x_date(breaks = all_actual_dates, date_labels = "%b %d") +
    scale_color_manual(values = c("Observed" = "black", "Forecast" = "#457B9D")) +
    labs(
-      title    = paste0("DMAPRIME-QR v4 Recursive Forecast [", phase, "]"),
+      title    = paste0(MODEL_LABEL, " Recursive Forecast [", phase, "]"),
       subtitle = paste0(
          "Latest observed: ", format(latest_observed_week, "%Y-%m-%d"),
          " (", observed_value, " admissions)"
       ),
       y       = "Weekly Inpatient Hospitalizations (Influenza, South Carolina)",
       x       = "Week Ending Date",
-      caption = paste0(
-         "v4: recursive 1-step QR + phase-aligned analogs | ",
-         "horizon shift eliminated by architecture"
-      )
+      caption = "Recursive 1-step QR + phase-aligned analogs | origin-only data (leakage-proof)"
    ) +
    theme_minimal() +
    theme(
@@ -1550,22 +2117,20 @@ p_final <- ggplot() +
 print(p_final)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 12. EXPORT CDC SUBMISSION  (unchanged from v3)
+# 12. EXPORT CDC SUBMISSION  (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 output_filename_cdc <- file.path(
    output_dir_cdc,
-   paste0(format(reference_date, "%Y-%m-%d"), "-DMAPRIME-QR-v4.csv")
+   paste0(format(reference_date, "%Y-%m-%d"), "-DMAPRIME-QR.csv")
 )
 # Uncomment to save:
-# write_csv(cdc_submission, output_filename_cdc)
+#write_csv(cdc_submission, output_filename_cdc)
 
 cat("\n✅ FINAL FORECAST COMPLETE\n")
 cat("CDC file: ", basename(output_filename_cdc), "\n")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 13. SOFTWARE IMPLEMENTATION FILE  (unchanged from v3)
-# ══════════════════════════════════════════════════════════════════════════════
+# 13. SOFTWARE IMPLEMENTATION FILE  (unchanged) ------------------------------
 
 impl_state_rfa <- RFA_data_Influenza %>%
    dplyr::select(week_end, weekly_IP) %>%
@@ -1595,9 +2160,13 @@ impl_state_forecast <- cdc_submission %>%
       target_end_date = as.Date(target_end_date)
    )
 
-sw_implementation_file <- bind_rows(impl_state_rfa, impl_state_hs, impl_state_forecast) %>%
+sw_implementation_file <- bind_rows(
+   impl_state_rfa %>% dplyr::mutate(reference_date = .env$reference_date),
+   impl_state_hs %>% dplyr::mutate(reference_date = .env$reference_date),
+   impl_state_forecast %>% dplyr::mutate(reference_date = .env$reference_date)
+) %>%
    dplyr::mutate(
-      reference_date = format(reference_date, "%Y-%m-%d"),
+      reference_date = reference_date,
       target = "wk inc flu hosp",
       target_end_date = format(target_end_date, "%Y-%m-%d"),
       location_general = "state", location = "SC", disease = "influenza",
@@ -1613,14 +2182,14 @@ sw_implementation_file <- bind_rows(impl_state_rfa, impl_state_hs, impl_state_fo
 
 output_filename_software <- file.path(
    output_dir_software_impl,
-   "inpatient-hosp-DMAPRIME-QR-v4-implementation.csv"
+   "inpatient-hosp-DMAPRIME-QR-implementation.csv"
 )
 # Uncomment to save:
-# write_csv(sw_implementation_file, output_filename_software)
+#write_csv(sw_implementation_file, output_filename_software)
 cat("Software implementation file: ", basename(output_filename_software), "\n")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 14. RETROSPECTIVE EVALUATION  (uses forecast_origin_v4)
+# 14. RETROSPECTIVE EVALUATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 ai_score <- function(actual, forecast) {
@@ -1633,11 +2202,86 @@ ai_score <- function(actual, forecast) {
 
 eval_origin_weeks <- flu_features %>%
    filter(week >= eval_start, week <= eval_end, !is.na(.data[[target_var]])) %>%
-   drop_na(all_of(c(predictors, state_vars))) %>%
+   drop_na(all_of(origin_ready_vars)) %>%
    pull(week)
 
+if (length(eval_origin_weeks) == 0) stop("No evaluation origins in [eval_start, eval_end].")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 14a. LEAKAGE PROOF - FUTURE-PERTURBATION TEST
+#
+#  If a forecast issued at origin T uses only data <= T, then overwriting every
+#  raw value AFTER T with noise (including filling future NAs) and rebuilding
+#  ALL features from scratch must leave that forecast unchanged to machine
+#  precision. This catches bad row filtering, unmasked labels, AND full-sample
+#  statistics inside feature engineering (the original L1, L2 and L3 all fail
+#  it). Tuning is held fixed: tuning_table was chosen on data before
+#  eval_start, which section 9 asserts.
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_origin_forecast <- function(features_df, origin_week, pool_df = pool_features) {
+   v <- make_origin_view(features_df, origin_week)
+   if (is.null(v)) return(NULL)
+   fc <- run_forecast_at(v, origin_week, opts_final, pool_df = pool_df)   # same pipeline as backtest
+   if (is.null(fc)) return(NULL)
+   fc$all_quantiles %>% arrange(horizon, quantile)
+}
+
+# Overwrite every numeric value dated after the origin with noise (and fill
+# future NAs), leaving the past untouched.
+perturb_future <- function(d, origin_week) {
+   fut <- d$week > origin_week
+   if (!any(fut)) return(d)
+   num_cols <- names(d)[vapply(d, is.numeric, logical(1))]
+   for (cc in num_cols) {
+      x <- as.numeric(d[[cc]])
+      xf <- x[fut]
+      xf <- ifelse(is.na(xf), runif(length(xf), 0, 500),
+                   xf * runif(length(xf), 0.1, 10) + runif(length(xf), 0, 500))
+      x[fut] <- xf
+      d[[cc]] <- x
+   }
+   d
+}
+
+leakage_perturbation_test <- function(origin_week, raw_flu = flu, seed = 2026) {
+   origin_week <- as.Date(origin_week)
+   set.seed(seed)
+   if (!any(raw_flu$week > origin_week)) return(NA)
+   flu_bad  <- perturb_future(raw_flu, origin_week)
+   # v5.2: the pooled states' future is corrupted too, then rebuilt from scratch
+   pool_bad <- if (POOL_STATES) {
+      build_pool_features(lapply(pool_flu_list, perturb_future, origin_week = origin_week))
+   } else NULL
+   a <- run_origin_forecast(flu_features, origin_week)
+   b <- run_origin_forecast(build_all_features(flu_bad), origin_week, pool_df = pool_bad)
+   if (is.null(a) && is.null(b)) return(NA)
+   if (is.null(a) != is.null(b)) return(FALSE)
+   identical(a$horizon, b$horizon) &&
+      identical(a$phase, b$phase) &&
+      isTRUE(all.equal(a$predicted_value, b$predicted_value, tolerance = 1e-10)) &&
+      isTRUE(all.equal(a$final_log,       b$final_log,       tolerance = 1e-10))
+}
+
+if (RUN_LEAKAGE_TEST) {
+   n_test <- min(LEAKAGE_TEST_N_ORIGINS, length(eval_origin_weeks))
+   test_origins <- unique(eval_origin_weeks[
+      round(seq(1, length(eval_origin_weeks), length.out = n_test))])
+   cat(sprintf("\n═══ LEAKAGE PERTURBATION TEST (%d origins) ═══\n", length(test_origins)))
+   leak_results <- vapply(test_origins, function(o) {
+      res <- leakage_perturbation_test(o)
+      cat(sprintf("  origin %s : %s\n", format(as.Date(o)),
+                  if (is.na(res)) "skipped (no forecast)" else if (res) "PASS" else "FAIL"))
+      res
+   }, logical(1))
+   if (any(leak_results %in% FALSE)) {
+      stop("LEAKAGE DETECTED: corrupting data after the origin changed a forecast.")
+   }
+   cat("  No future information reaches any tested forecast.\n")
+}
+
 cat(sprintf(
-   "\nRetrospective evaluation v4 over %d origin weeks (%s to %s)\n",
+   "\nRetrospective evaluation over %d origin weeks (%s to %s)\n",
    length(eval_origin_weeks),
    format(min(eval_origin_weeks), "%Y-%m-%d"),
    format(max(eval_origin_weeks), "%Y-%m-%d")
@@ -1648,29 +2292,12 @@ retro_rows <- list()
 for (origin_week in eval_origin_weeks) {
    origin_week <- as.Date(origin_week)
    
-   # Origin-specific thresholds — only data <= origin_week used
-   thr_retro <- compute_origin_thresholds(flu_features, origin_week)
+   # Past-only view: rows <= origin, future labels masked, origin thresholds,
+   # origin regime flags, origin phases. (The original kept rows to origin+4.)
+   view_retro <- make_origin_view(flu_features, origin_week)
+   if (is.null(view_retro)) next
    
-   # Rebuild phase labels with these thresholds for the feature df passed
-   # into the forecast engine and the QR fitter
-   flu_features_retro <- flu_features %>%
-      filter(week <= origin_week + weeks(4)) %>%   # keep future labels intact
-      assign_phase(thr_retro)
-   
-   models_retro <- fit_all_qr_models(
-      df = flu_features_retro,
-      label_cutoff_week = origin_week
-   )
-   
-   fc_retro <- forecast_origin_v4(
-      origin_week  = origin_week,
-      df           = flu_features_retro,
-      qr_models    = models_retro$qr_models,
-      residual_df  = models_retro$residual_df,
-      tuning_table = tuning_table,
-      thr          = thr_retro,
-      quantiles    = quantiles
-   )
+   fc_retro <- run_forecast_at(view_retro, origin_week, opts_final)
    
    if (is.null(fc_retro)) next
    
@@ -1680,9 +2307,19 @@ for (origin_week in eval_origin_weeks) {
       dplyr::select(
          origin_week, target_end_date, horizon, forecast_median,
          phase, raw_corrected_log, final_log, qr_median_log, analog_target_log,
-         blend_qr, prob_peak_by_1, prob_peak_by_2, prob_peak_by_3, prob_peak_by_4
+         blend_qr, prob_peak_by_1, prob_peak_by_2, prob_peak_by_3, prob_peak_by_4,
+         rec_log, dir_log, pull_unit, w_direct, pool_log, w_pool
       )
    
+   # Interval quantiles for coverage checks
+   q_retro <- fc_retro$all_quantiles %>%
+      filter(quantile %in% c(0.025, 0.25, 0.75, 0.975)) %>%
+      dplyr::select(horizon, quantile, predicted_value) %>%
+      mutate(quantile = paste0("q", quantile)) %>%
+      pivot_wider(names_from = quantile, values_from = predicted_value)
+   med_retro <- med_retro %>% left_join(q_retro, by = "horizon")
+   
+   # Truth lookup for SCORING ONLY (after the forecast is fixed)
    for (i in seq_len(nrow(med_retro))) {
       target_week <- med_retro$target_end_date[i]
       truth_row   <- flu_features %>% filter(week == target_week)
@@ -1708,7 +2345,7 @@ retro_df <- bind_rows(retro_rows) %>%
       ))
    )
 
-cat("\n═══ OVERALL PERIOD SUMMARY v4 ═══\n")
+cat("\n═══ OVERALL PERIOD SUMMARY ═══\n")
 overall_summary <- retro_df %>%
    summarise(
       n_obs          = n(),
@@ -1725,7 +2362,7 @@ overall_summary <- retro_df %>%
    )
 print(overall_summary)
 
-cat("\n═══ PERFORMANCE BY HORIZON v4 ═══\n")
+cat("\n═══ PERFORMANCE BY HORIZON ═══\n")
 horizon_summary <- retro_df %>%
    group_by(horizon) %>%
    summarise(
@@ -1742,7 +2379,76 @@ horizon_summary <- retro_df %>%
    mutate(horizon_label = paste0("H", horizon, " (", horizon + 1, "-wk ahead)"))
 print(horizon_summary)
 
-cat("\n═══ WEEK-BY-WEEK DETAIL v4 ═══\n")
+cat("\n═══ INTERVAL COVERAGE (nominal 50% and 95%) ═══\n")
+coverage_summary <- retro_df %>%
+   group_by(horizon) %>%
+   summarise(
+      cover_50 = round(100 * mean(actual >= q0.25  & actual <= q0.75,  na.rm = TRUE), 1),
+      cover_95 = round(100 * mean(actual >= q0.025 & actual <= q0.975, na.rm = TRUE), 1),
+      .groups = "drop"
+   )
+print(coverage_summary)
+
+cat("\n═══ VS. PERSISTENCE (forecast = value observed at origin) ═══\n")
+persistence_summary <- retro_df %>%
+   left_join(flu_features %>% dplyr::select(week, origin_value = all_of(target_var)),
+             by = c("origin_week" = "week")) %>%
+   group_by(horizon) %>%
+   summarise(
+      model_ai       = round(mean(ai_score, na.rm = TRUE), 4),
+      persistence_ai = round(mean(ai_score(actual, origin_value), na.rm = TRUE), 4),
+      .groups = "drop"
+   ) %>%
+   mutate(beats_persistence = model_ai > persistence_ai)
+print(persistence_summary)
+
+cat("\n═══ TIMING LAG (weeks the forecast trails the observed curve) ═══\n")
+lag_summary <- retro_df %>%
+   dplyr::select(horizon, target_end_date, forecast_median) %>%
+   crossing(shift = 0:5) %>%
+   mutate(week = target_end_date - weeks(shift)) %>%
+   left_join(flu_features %>% dplyr::select(week, obs = all_of(target_var)), by = "week") %>%
+   group_by(horizon, shift) %>%
+   summarise(r = cor(log1p(forecast_median), log1p(obs), use = "complete.obs"),
+             .groups = "drop") %>%
+   group_by(horizon) %>%
+   slice_max(r, n = 1, with_ties = FALSE) %>%
+   ungroup() %>%
+   rename(best_shift_wk = shift)
+print(lag_summary)
+cat("  0 = on time; close to h+1 = the forecast mostly carries the origin level forward.\n")
+
+# One-row summary per configuration - append across runs to compare switches
+config_summary <- tibble(
+   run_time      = format(Sys.time(), "%Y-%m-%d %H:%M"),
+   config        = .cfg_tag,
+   eval_window   = paste(eval_start, eval_end, sep = " to "),
+   direct_w      = paste(sprintf("%.2f", opts_final$direct_w), collapse = "/"),
+   pool_w        = paste(sprintf("%.2f", opts_final$pool_w), collapse = "/"),
+   peak_lambda   = opts_final$peak_lambda,
+   mean_ai       = round(mean(retro_df$ai_score, na.rm = TRUE), 4)
+) %>%
+   bind_cols(
+      horizon_summary %>%
+         dplyr::select(horizon, mean_ai_score) %>%
+         mutate(name = paste0("ai_h", horizon)) %>%
+         dplyr::select(name, mean_ai_score) %>%
+         pivot_wider(names_from = name, values_from = mean_ai_score),
+      coverage_summary %>%
+         summarise(cover_50 = mean(cover_50), cover_95 = mean(cover_95)),
+      lag_summary %>%
+         mutate(name = paste0("lag_h", horizon)) %>%
+         dplyr::select(name, best_shift_wk) %>%
+         pivot_wider(names_from = name, values_from = best_shift_wk)
+   )
+cat("\n═══ CONFIG SUMMARY ═══\n")
+print(as.data.frame(config_summary))
+
+config_log_file <- file.path(output_dir_cdc, "v52LP_config_comparison.csv")
+# Uncomment to append this run to the comparison log:
+# write_csv(config_summary, config_log_file, append = file.exists(config_log_file))
+
+cat("\n═══ WEEK-BY-WEEK DETAIL ═══\n")
 week_detail <- retro_df %>%
    dplyr::select(
       origin_week, target_end_date, horizon, actual, forecast_median,
@@ -1753,7 +2459,7 @@ week_detail <- retro_df %>%
 print(week_detail, n = Inf)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 15. RETROSPECTIVE VISUALIZATIONS  (unchanged from v3)
+# 15. RETROSPECTIVE VISUALIZATIONS  (unchanged apart from titles)
 # ══════════════════════════════════════════════════════════════════════════════
 
 band_colors <- c(
@@ -1794,13 +2500,13 @@ p_diag <- ggplot() +
                 expand = expansion(mult = 0.02)) +
    scale_y_continuous(labels = comma, expand = expansion(mult = c(0.02, 0.08))) +
    labs(
-      title    = "State-Level: CDC Observed vs Forecast Diagnostic — v4 Recursive",
-      subtitle = "Colored lines are median forecasts by horizon; recursive approach eliminates horizon shift",
+      title    = paste0("State-Level: CDC Observed vs Forecast Diagnostic - ", MODEL_LABEL),
+      subtitle = "Colored lines are median forecasts by horizon (origin-only data)",
       x = "Week Ending Date",
       y = "Weekly Inpatient Hospitalizations (Influenza, SC)",
       caption = paste0(
-         "Black = CDC observed | Colored = DMAPRIME-QR v4 median forecast by horizon\n",
-         "v4: recursive 1-step forecasting — each horizon uses features updated with prior horizon prediction."
+         "Black = CDC observed | Colored = median forecast by horizon\n",
+         "Each horizon uses features updated with the prior horizon's prediction, never observed future data."
       )
    ) +
    theme_minimal(base_size = 12) +
@@ -1827,7 +2533,7 @@ p_time <- ggplot(retro_df,
    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
    scale_x_date(date_breaks = "2 weeks", date_labels = "%b %d") +
    facet_wrap(~ paste0("H", horizon, " (", horizon + 1, "-wk ahead)"), ncol = 2) +
-   labs(title    = "Retrospective AI Scores by Horizon — v4 Recursive",
+   labs(title    = paste0("Retrospective AI Scores by Horizon - ", MODEL_LABEL),
         subtitle = "AI = min(actual, forecast) / max(actual, forecast)",
         x = "Target end date", y = "AI score") +
    theme_minimal(base_size = 11) +
@@ -1841,7 +2547,7 @@ p_scatter <- ggplot(retro_df, aes(x = actual, y = forecast_median, color = score
    geom_point(size = 2.5, alpha = 0.85) +
    scale_color_manual(values = band_colors, name = "Score band") +
    facet_wrap(~ paste0("H", horizon, " (", horizon + 1, "-wk ahead)"), ncol = 2) +
-   labs(title    = "Actual vs. Forecast — Retrospective Evaluation v4 Recursive",
+   labs(title    = paste0("Actual vs. Forecast - Retrospective Evaluation ", MODEL_LABEL),
         subtitle = "Dashed line = perfect forecast",
         x = "Observed CDC hospitalizations", y = "Median forecast",
         caption = "Points above line = over-forecast; below line = under-forecast") +
@@ -1869,7 +2575,7 @@ p_bar <- horizon_summary %>%
               color = "gray50", linewidth = 0.4) +
    scale_fill_manual(values = band_colors, name = "Score band") +
    scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, 0.1)) +
-   labs(title    = "Mean AI Score by Forecast Horizon — v4 Recursive",
+   labs(title    = paste0("Mean AI Score by Forecast Horizon - ", MODEL_LABEL),
         subtitle = "Recursive 1-step QR + analog forecast",
         x = NULL, y = "Mean AI score") +
    theme_minimal(base_size = 11) +
@@ -1877,35 +2583,54 @@ p_bar <- horizon_summary %>%
 print(p_bar)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 16. EXPORT RETROSPECTIVE + SOFTWARE EVALUATION  (unchanged from v3)
+# 16. EXPORT RETROSPECTIVE + SOFTWARE EVALUATION  (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 output_retro_file <- file.path(
-   output_dir_cdc, "retrospective_ai_scores_v4_dec2025_mar2026.csv"
+   output_dir_cdc, paste0("retrospective_ai_scores_", MODEL_TAG, ".csv")
 )
 output_horizon_summary_file <- file.path(
-   output_dir_cdc, "retrospective_ai_scores_v4_by_horizon_summary.csv"
+   output_dir_cdc, paste0("retrospective_ai_scores_", MODEL_TAG, "_by_horizon_summary.csv")
 )
 # Uncomment to save:
 # write_csv(retro_df, output_retro_file)
 # write_csv(horizon_summary, output_horizon_summary_file)
 
 eval_state_training <- flu_features %>%
-   dplyr::filter(week < train_cut & !is.na(.data[[target_var]])) %>%
+   dplyr::filter(week <= train_cut & !is.na(.data[[target_var]])) %>%
    dplyr::mutate(
       value = .data[[target_var]], training_validation = 1,
-      estimate_projected_report = NA_integer_, target_end_date = week
+      target_end_date = week
    )
 
-eval_state_testing <- cdc_submission %>%
-   dplyr::filter(output_type_id == 0.5) %>%
+eval_state_validation <- flu_features %>%
+   dplyr::filter(
+      week >= train_cut &
+         week <= valid_end &
+         !is.na(.data[[target_var]])
+   ) %>%
    dplyr::mutate(
+      value = .data[[target_var]], training_validation = 2,
+      target_end_date = week
+   )
+
+eval_state_testing <- retro_df %>%
+   dplyr::filter(
+      origin_week >= eval_start &
+         origin_week <= eval_end &
+         !is.na(.data[["forecast_median"]])
+   ) %>%
+   dplyr::mutate(
+      value = .data[["forecast_median"]],
       training_validation = 0,
-      estimate_projected_report = as.integer(horizon),
       target_end_date = target_end_date
    )
 
-sw_evaluation_file <- bind_rows(eval_state_training, eval_state_testing) %>%
+sw_evaluation_file <- bind_rows(
+   eval_state_training   %>% dplyr::mutate(reference_date = .env$reference_date),
+   eval_state_validation %>% dplyr::mutate(reference_date = .env$reference_date),
+   eval_state_testing    %>% dplyr::mutate(reference_date = .env$reference_date)
+) %>%
    dplyr::mutate(
       reference_date = format(reference_date, "%Y-%m-%d"),
       target = "wk inc flu hosp",
@@ -1919,36 +2644,34 @@ sw_evaluation_file <- bind_rows(eval_state_training, eval_state_testing) %>%
    dplyr::arrange(target_end_date) %>%
    dplyr::select(
       reference_date, target, target_end_date, location_general, location,
-      value, disease, population, training_validation, estimate_projected_report,
+      value, disease, population, training_validation, horizon,
       imputed, data_source, outcome_measure, output_type, output_type_id
    )
 
 output_filename_eval <- file.path(
    output_dir_software_eval,
-   "inpatient-hosp-DMAPRIME-QR-v4-evaluation.csv"
+   "inpatient-hosp-DMAPRIME-QR-evaluation.csv"
 )
 # Uncomment to save:
-# write_csv(sw_evaluation_file, output_filename_eval)
+#write_csv(sw_evaluation_file, output_filename_eval)
 
 cat("Software evaluation file: ", basename(output_filename_eval), "\n")
 
-cat("\n✅ RETROSPECTIVE EVALUATION v4 COMPLETE\n")
+cat("\n✅ RETROSPECTIVE EVALUATION COMPLETE\n")
 cat(sprintf("Rows evaluated : %d\n", nrow(retro_df)))
 cat(sprintf("Origin weeks   : %d\n", n_distinct(retro_df$origin_week)))
 cat(sprintf("Overall mean AI: %.4f\n", mean(retro_df$ai_score, na.rm = TRUE)))
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 17. ORIGIN-PATH DIAGNOSTIC  (unchanged from v3 — now should show flat paths)
+# 17. ORIGIN-PATH DIAGNOSTIC  (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Observed line: start exactly at eval_start (no pre-period history)
 actual_line <- flu_features %>%
    filter(week >= eval_start,
           week <= eval_end + weeks(4),
           !is.na(.data[[target_var]])) %>%
    dplyr::select(week, actual = all_of(target_var))
 
-# Up to 16 panels, ordered chronologically (not alphabetically)
 selected_origins <- retro_df %>%
    filter(origin_week >= eval_start,
           origin_week <= eval_end) %>%
@@ -1957,7 +2680,6 @@ selected_origins <- retro_df %>%
    dplyr::slice(1:16) %>%
    pull(origin_week)
 
-# Build ordered factor so facet_wrap respects chronological order
 origin_path_df <- retro_df %>%
    filter(origin_week %in% selected_origins) %>%
    mutate(
@@ -1966,18 +2688,10 @@ origin_path_df <- retro_df %>%
          levels = paste0("Issued ", format(sort(selected_origins), "%b %d"))
       ),
       horizon_label = paste0("H", horizon, " / ", horizon + 1, "-wk ahead")
-   )
-
-# Each panel only needs to show ~6 weeks: 2 weeks of observed context before
-# the origin + 4 forecast weeks.  We achieve this by filtering actual_line
-# per-panel inside the data rather than relying on free_x scales (which would
-# hide the epidemic context).  Instead use scales="free_x" so each panel
-# auto-ranges to its own origin window.
-origin_path_df <- origin_path_df %>%
+   ) %>%
    mutate(panel_xmin = origin_week - weeks(3),
           panel_xmax = target_end_date)
 
-# Restrict observed line to only the dates that appear in at least one panel
 obs_dates_needed <- sort(unique(c(
    as.Date(unlist(lapply(selected_origins, function(o) {
       seq(o - weeks(3), o + weeks(4), by = "week")
@@ -2005,15 +2719,12 @@ p_origin_paths <- ggplot() +
    scale_x_date(date_breaks = "1 week", date_labels = "%b %d") +
    scale_y_continuous(labels = comma) +
    labs(
-      title    = "Forecast Paths by Origin Week — v4 Recursive (Horizon-Shift Diagnostic)",
+      title    = paste0("Forecast Paths by Origin Week - ", MODEL_LABEL),
       subtitle = "Each blue line is one issued 4-week forecast path; black is observed CDC",
       x = "Week Ending Date",
       y = "Weekly Inpatient Hospitalizations (Influenza, SC)",
       shape   = "Forecast horizon",
-      caption = paste0(
-         "v4 recursive: each step conditions on prior step prediction — ",
-         "horizon shift is architecturally prevented."
-      )
+      caption = "Each step conditions on the prior step's prediction only."
    ) +
    theme_minimal(base_size = 11) +
    theme(
