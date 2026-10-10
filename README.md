@@ -4,7 +4,7 @@
 
 This repository contains the model implementation for forecasting weekly influenza hospital admissions for South Carolina and for the U.S. national total. The workflow is a recursive quantile-regression model that blends trend-aware quantile regression with historical analogs, with EHR and cross-state signals available as additional predictors in the v2.0 implementation.
 
-The implementation is defined by the current code in `QR.r` and the model metadata in `DMAPRIME-QR.yml`, which together describe version 2.0 of the model.
+
 
 ## Key Features
 
