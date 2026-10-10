@@ -2,246 +2,213 @@
 
 ## Overview
 
-This repository contains a **recursive hybrid forecasting model** for predicting weekly influenza-related inpatient hospitalizations in South Carolina. The model applies **1-step quantile regression recursively across multiple horizons**, combining **direct quantile regression with phase-aligned analog correction**.
+This repository contains the model implementation for forecasting weekly influenza hospital admissions for South Carolina and for the U.S. national total. The workflow is a recursive quantile-regression model that blends trend-aware quantile regression with historical analogs, with EHR and cross-state signals available as additional predictors in the v2.0 implementation.
 
+The implementation is defined by the current code in `QR.r` and the model metadata in `DMAPRIME-QR.yml`, which together describe version 2.0 of the model.
 
 ## Key Features
 
-### 1. Recursive Forecasting Architecture 
-  - Fit H0 model (1-step ahead quantile regression)
-  - Append H0 prediction to feature series and recompute all features (slopes, lags, rolling stats, phase)
-  - Use updated features to forecast H1 with the same H0 model
-  - Repeat for H2, H3
+### 1. Recursive Forecasting Architecture
+- Fit the H0 model as a one-step quantile regression on the current feature set
+- Append the predicted value to the series and recompute lag, slope, rolling-statistic, and phase features
+- Reuse the same QR model for recursive forecasting at H1, H2, and H3
+- Forecast horizons supported by the implementation are 0, 1, 2, and 3 weeks ahead
 
 ### 2. Hybrid Forecasting Approach
-- **Quantile Regression (QR)**: 1-step horizon-specific quantile regression model
-- **Analog Correction**: Identifies historical periods with similar epidemiological states and uses their outcomes to adjust predictions
-- **Decline-Aware Weighting**: Applies phase-specific penalties during decline periods to reduce overly optimistic rebound predictions
+- Quantile Regression (QR): recursive one-step model using covariates engineered from the observed and synthetic series
+- Analog Correction: historical periods with similar epidemiologic state are used to adjust predictions
+- Phase-aware blending: decline and peak conditions can modify the QR/analog balance
+- External signals: the v2.0 workflow supports a cross-state signal (`pct_states_rising`) and optional pooled-state training
 
 ### 3. Feature Engineering
 The model uses engineered features including:
-- **Lag features**: Target values at 1, 2, 3, 4, 5, 8, and 12-week lags
-- **Slope features**: 1-4 week slopes and slope changes to capture trajectory
-- **Acceleration features**: Rate of change in slopes (2-week and 3-week acceleration)
-- **Decline persistence**: Indicators for sustained negative trends
-- **Rolling statistics**: 4-, 8-, and 12-week means and standard deviations
-- **Position in cycle**: Where current levels sit in the 12-week rolling range
-- **Peak dynamics**: Weeks since 12-week peak, distance from peak, and post-peak decline speed
-- **EHR indicators**: Hospitalization and positive test slopes with decline confirmation
-- **Seasonal features**: Week of year harmonics (sin/cos) and holiday indicators
+- Lag features: 1-, 2-, 3-, 4-, 5-, 8-, and 12-week lags
+- Slope features: 1-, 2-, 3-, and 4-week slopes and prior-slope terms
+- Acceleration features: 2- and 3-week acceleration terms
+- Decline persistence indicators: sustained negative change conditions
+- Rolling statistics: 4-, 8-, and 12-week means, standard deviations, maxima, and minima
+- Position in cycle: values relative to recent 8- and 12-week ranges
+- Peak dynamics: weeks since recent peak, drop from recent peak, and recent peak ratio
+- EHR indicators: hospital, positive-test, and testing series slopes with decline confirmation
+- Seasonal features: week-of-year sine/cosine terms and holiday indicators
 
 ### 4. Phase-Based Classification
-The model identifies and adapts to 9 epidemic phases:
-1. **FAST_POST_PEAK_DECLINE** - Rapid post-peak decline
-2. **POST_PEAK_DECLINE** - Standard post-peak decline
-3. **ACCELERATING_DECLINE** - Declining trend with acceleration
-4. **SLOWING_DECLINE** - Declining trend with deceleration
-5. **ACCELERATING_INCREASE** - Rising trend with acceleration
-6. **SLOWING_INCREASE** - Rising trend with deceleration
-7. **NEAR_PEAK_DECELERATION** - Near peak with decelerating trend
-8. **VOLATILE_PLATEAU** - Stable levels with high variability
-9. **STABLE_PLATEAU** - Stable levels with low variability
+The model identifies and adapts to epidemic phases including:
+1. FAST_POST_PEAK_DECLINE
+2. POST_PEAK_DECLINE
+3. ACCELERATING_DECLINE
+4. SLOWING_DECLINE
+5. ACCELERATING_INCREASE
+6. SLOWING_INCREASE
+7. NEAR_PEAK_DECELERATION
+8. VOLATILE_PLATEAU
+9. STABLE_PLATEAU
 
-Phase detection drives adaptive interval scaling and QR floor constraints.
+Phase detection drives adaptive interval scaling and QR/analog balance adjustments.
 
 ### 5. Data Integration
-The model integrates multiple data sources:
-- **CDC NHSN Data**: Official weekly flu hospitalizations (location 45 = South Carolina)
-- **Electronic Health Record (EHR) Data**: 
-  - Prisma Health weekly influenza surveillance data
-
+The v2.0 implementation integrates multiple data sources:
+- CDC weekly influenza hospital admission data for state-level panels and the U.S. total
+- South Carolina target data extracted from the CDC panel using the SC FIPS/location mapping
+- EHR surveillance data from Prisma Health and MUSC
+- External state-level signal for the fraction of other states rising (`pct_states_rising`)
+- Optional pooling of other states for additional training rows, rescaled to South Carolina population
 
 ## Repository Contents
 
 ### Files
 
-- **`QR.r`** - Main forecasting pipeline 
+- `QR.r` - Main forecasting pipeline
   - Data loading and merging
-  - Feature engineering
-  - Phase labeling with origin-specific thresholds (no temporal leakage)
-  - **Tuning for H0 only** (single-step quantile regression)
-  - **Recursive forecast generation**:
-    - Fit H0 → predict → append predicted row → recompute all features
-    - Use updated features to forecast H1 (reusing H0 model) → predict → append → recompute
-    - Repeat for H2, H3
-  - Quantile interval construction (blended analog + residual errors)
-  - Diagnostic outputs and visualization
-  - CDC submission file generation
-  - Software implementation and evaluation file outputs
+  - Feature engineering and origin-specific phase assignment
+  - Leakage-protected time-series logic
+  - Validation and tuning for the recursive model
+  - Recursive forecast generation for horizons 0, 1, 2, and 3
+  - Quantile interval construction and forecast outputs
+  - Diagnostics and visualization
+  - CDC submission and evaluation outputs
 
-- **`DMAPRIME-QR.yml`** - Model metadata and documentation
-  - Team and contact information
-  - Model description and methods
-  - Data source specification
+- `DMAPRIME-QR.yml` - Model metadata and documentation
+  - Team and model metadata
+  - Model version and methods statement
+  - Data input description
   - Funding and licensing information
 
-- **`README.md`** - This file
+- `README.md` - Project overview and model documentation
 
 ## Workflow
 
-### 1. **Data Preparation**
-- Load CDC and Prisma weekly hospitalization data
-- Align datasets by week
-- Standardize column names
+### 1. Data Preparation
+- Load CDC panel data for states and U.S. totals
+- Load the South Carolina target series and national-total series as needed
+- Load MUSC and Prisma weekly EHR series
+- Align datasets by week and standardize column names
+- Create the weekly panel used for forecasting and pooled-state training
 
-### 2. **Feature Engineering**
-- Compute predictive features from historical time series
-- Apply log transformation with safe handling of zero/missing values
-- Calculate rolling statistics and seasonal components
-- Determine epidemic phase using origin-specific thresholds
+### 2. Feature Engineering
+- Compute target and predictor time-series features from observed and recursive forecast rows
+- Apply log-transformed target features and safe handling for zeros and missing values
+- Calculate rolling statistics, lags, slopes, acceleration, and seasonal terms
+- Assign phase and regime flags using origin-specific thresholds, without exposing future observations to the model
 
-### 3. **Rolling Validation (H0 Only)**
-- For each week in the validation period (Sept 2022 – Oct 2024):
-  - Compute origin-specific thresholds from data ≤ origin_week (no leakage)
-  - Train H0 quantile regression model on all prior data using complete cases
-  - Identify analogs from historical pool
-  - Evaluate tuning parameters:
-    - `k`: Number of analogs (candidate values: 8, 12, 16, 20, 25, 30)
-    - `bandwidth`: Analog weight decay (0.50–2.00)
-    - `blend_qr`: Mixing proportion QR vs. analog (0–1.0 in 0.1 increments)
-  - Compute Mean Absolute Error (MAE) in log space
-  - Select best hyperparameters for H0
+### 3. Validation and Tuning
+- Use validation origins within the configured tuning window
+- Train the QR model on historical rows with labels known by the origin
+- Evaluate candidate analog settings and blend weights
+- Select tuning parameters by minimizing MAE in log space for the recursive model configuration
 
-### 4. **Hyperparameter Propagation (H0 → H1, H2, H3)**
-- H1, H2, H3 use the same H0 quantile regression model
-- Tuning parameters (k, bandwidth) from H0 are reused across all horizons
-- `blend_qr` is slightly reduced for longer horizons to encourage analog influence (penalty: h × 0.05)
+### 4. Model Training
+- Fit the QR model using the available historical training data for each forecast horizon
+- Reuse the same recursive forecasting recipe for H0 through H3
+- Build per-horizon models and residual diagnostics from training rows where labels are known at the forecast origin
 
-### 5. **Model Training**
-- Fit **single quantile regression model (H0)** using all training data up to label cutoff
-- Capture residuals by phase for uncertainty quantification
-- This model is reused recursively for all horizons
+### 5. Recursive Forecast Generation
+- H0 (nowcast): predict from the current feature row
+- Append the H0 prediction to create a synthetic next row and recompute features
+- Forecast H1 from the updated feature row
+- Repeat recursively for H2 and H3
+- Blend QR predictions with analog-based adjustments under phase-aware settings
+- Construct a set of quantile forecasts for the final output
 
-### 6. **Recursive Forecast Generation**
-- **H0 (nowcast)**: Fit H0 QR on current features → predict 1-step ahead
-- **Append H0 prediction**: Create synthetic row with predicted log_target, preserve EHR state
-- **Recompute Features**: Recalculate all lag, slope, rolling stats, phase features for the new synthetic row using extended time series
-- **H1 (1-wk ahead)**: Apply H0 QR model to the updated feature row → generates H1 prediction
-- **Repeat for H2, H3**: Append predictions, recompute features iteratively
-- **Blend predictions**: Combine QR median and analog quantiles using phase-specific weights
-- **Generate quantiles**: Predictions at 23 quantile levels (0.01–0.99)
-- **Apply phase-conditioned interval scaling**: Narrow intervals during decline to reduce uncertainty
-- **Ensure monotonicity**: via isotonic regression across quantiles
+### 6. Output Generation
+- Forecast targets include weekly influenza hospital admissions for South Carolina and the U.S. national total
+- Generated outputs include quantile forecasts at horizons 0, 1, 2, and 3
+- Export files are produced for CDC submission, software implementation, and evaluation workflows
 
-### 7. **Output Generation**
-- **CDC Submission File** (Section 12):
-  - Format: CDC FluSight Hub submission format
-  - Contains all quantile predictions (0–4 weeks ahead)
-  
-- **Software Implementation File** (Section 13):
-  - Combines historical data (RFA + EHR sources) with forecasts
-  - Ready for deployment in forecasting infrastructure
-  
-- **Evaluation File** (Section 16):
-  - Training data and median-only forecasts
-  - Used for model performance assessment
-
-### 8. **Visualization**
-- Plots observed time series (20 weeks back)
-- Overlays median forecast and 50% / 95% prediction intervals
-- Marks forecast origin line
-- Indicates detected phase in title
-
+### 7. Visualization and Diagnostics
+- Plot recent observed series and forecast medians across the forecast window
+- Display interval bands and phase labels
+- Summarize analog diagnostics, peak probabilities, and model components
 
 ## Key Hyperparameters
 
-| Parameter | Default Range | Purpose |
-|-----------|---------------|---------|
-| `candidate_k` | 8, 12, 16, 20, 25, 30 | Number of analog neighbors (H0 tuning only) |
-| `candidate_bandwidth` | 0.50–2.00 | Decay rate for analog weights (H0 tuning only) |
-| `candidate_blend_qr` | 0.0–1.0 (step 0.1) | QR-analog mixing proportion (H0 tuning only) |
-| `quantiles` | 0.01–0.99 (23 levels) | Forecast quantile levels (all horizons) |
-| `horizons` | 0, 1, 2, 3 | Weeks ahead to forecast (recursive application of H0 model) |
-
-## Tuning Metrics
-
-- **Metric**: Mean Absolute Error (MAE) in log-transformed space
-- **Tuning Period**: Sept 1, 2022 – Oct 1, 2024
-- **Candidates Evaluated**: 6 × 6 = **36 configurations** per origin (H0 only; hyperparameters propagated to H1–H3)
-- **Selection**: Best MAE for H0; same (k, bandwidth) reused for H1–H3 with horizon-indexed blend_qr adjustment
-
-## Decline-Aware Adjustments
-
-During decline phases:
-- **QR Ceiling**: Maximum blend weight for QR (e.g., 30% for FAST_POST_PEAK_DECLINE), allowing analogs more influence
-- **Rebound Penalty**: Reduce weights of analogs predicting increases by 85%
-- **Weak Decline Penalty**: Reduce weights of analogs with marginal declines
-- **Interval Scaling**: Narrow intervals during decline to reduce uncertainty
-- **Late Peak Penalty**: During H2+ forecasts in peak phases, penalize analogs predicting peaks >2 weeks away
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `quantiles` | 0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99 | Forecast quantile levels |
+| `horizons` | 0, 1, 2, 3 | Forecast horizon values supported by the implementation |
+| `candidate_k` | 8, 12, 16, 20, 25, 30 | Candidate analog counts |
+| `candidate_bandwidth` | 0.50, 0.75, 1.00, 1.25, 1.50, 2.00 | Candidate analog decay widths |
+| `candidate_blend_qr` | 0.0 to 1.0 by 0.10 | Candidate QR/analog blending levels |
+| `train_cut` | 2022-09-01 | Training cutoff for validation work |
+| `valid_end` | 2025-10-01 | Validation-end date used in the code |
+| `eval_start` | 2025-11-06 | Evaluation-start date used in the code |
+| `eval_end` | 2026-03-07 | Evaluation-end date used in the code |
 
 ## Requirements
 
 ### R Packages
 ```r
-library(dplyr)          # Data manipulation
-library(lubridate)      # Date handling
-library(ggplot2)        # Visualization
-library(purrr)          # Functional programming
-library(readr)          # CSV I/O
-library(quantreg)       # Quantile regression
-library(tidyr)          # Tidy data
-library(slider)         # Rolling windows
-library(scales)         # Plot scaling
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(lubridate)
+  library(ggplot2)
+  library(purrr)
+  library(readr)
+  library(quantreg)
+  library(tidyr)
+  library(slider)
+  library(scales)
+})
 ```
 
 ### Data Files
-- RFA weekly influenza data (2017–2025)
-- CDC hospital admissions (NHSN)
-- Prisma Health weekly influenza surveillance
+The implementation uses the following data inputs as represented in `QR.r`:
+- RFA weekly influenza data series for the state-level target
+- CDC admissions panel data for states and U.S. national total
+- MUSC weekly influenza EHR data
+- Prisma Health weekly influenza EHR and testing data
+- Output directories for CDC submission, software implementation, and evaluation files
 
-**Note**: Data paths are currently hardcoded to local Box Cloud Storage directories. Modify paths before running.
+**Note**: Data paths are hardcoded in the implementation and are not repository-managed file paths.
 
 ## Workflow Diagram
 
-```
+```text
 Data Loading
     ↓
-Feature Engineering 
+CDC + EHR + external signal preparation
     ↓
-Phase Classification (origin-specific thresholds)
+Feature Engineering
     ↓
-Rolling Validation (H0 only)
+Origin-specific phase and regime assignment
     ↓
-Hyperparameter Selection (best MAE for H0)
+Validation and tuning
     ↓
-Final Model Training (H0 QR)
+Recursive QR forecast generation
+    ├─ H0: current-week prediction
+    ├─ append prediction and recompute features
+    ├─ H1: 1-week-ahead prediction
+    ├─ append prediction and recompute features
+    ├─ H2: 2-week-ahead prediction
+    ├─ append prediction and recompute features
+    ├─ H3: 3-week-ahead prediction
+    └─ blend QR + analog outputs
     ↓
-Recursive Forecast Generation
-    ├→ H0: QR Prediction + Analog Blending
-    ├→ Append H0 → Recompute Features
-    ├→ H1: QR Prediction (updated features) + Analog Blending
-    ├→ Append H1 → Recompute Features
-    ├→ H2: QR Prediction (updated features) + Analog Blending
-    ├→ Append H2 → Recompute Features
-    ├→ H3: QR Prediction (updated features) + Analog Blending
-    ├→ Quantile Construction (23 levels)
-    └→ Monotonicity Enforcement (isotonic regression)
+Quantile forecast construction
     ↓
-Output File Generation
-    ├→ CDC Submission
-    ├→ Software Implementation
-    └→ Evaluation
+Output generation
+    ├─ CDC submission format
+    ├─ software implementation file
+    └─ evaluation file
     ↓
-Visualization & Diagnostics
+Visualization and diagnostics
 ```
 
 ## Model Validation
 
 ### Metrics Produced
-- **MAE (log scale)** - Tuning metric
-- **Residual distributions** - By phase and horizon
-- **Analog diagnostics** - Mean distance, weight distribution, rebound/decline shares
-- **Blend composition** - QR vs. analog contribution per forecast
-- **AI Score** - Alignment Index: min(actual, forecast) / max(actual, forecast)
+- MAE in log space for tuning
+- Residual diagnostics by phase and horizon
+- Analog diagnostics including distance, weighting, and phase composition
+- Blend composition summaries for QR vs. analog contributions
+- Forecast coverage and retrospective evaluation summaries
 
 ### Diagnostics Reported
 - Latest observed week and value
-- Detected phase and phase-specific state variables
+- Detected phase and support variables
 - Forecast medians by horizon
-- Analog pool statistics (n, mean change, weight concentration)
-- QR vs. analog blend weights
-- Peak probability forecasts (prob_peak_by_1/2/3/4)
-
+- Summary of analog pool composition
+- Peak probability outputs for the forecast path
 
 ## License
 
@@ -249,5 +216,5 @@ Creative Commons Attribution 4.0 International (CC-BY-4.0)
 
 ---
 
-**Last Updated**: June 14, 2026  
-**Model Version**: 1.9
+**Last Updated**: 2026-10-10  
+**Model Version**: 2.0
