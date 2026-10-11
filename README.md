@@ -81,7 +81,7 @@ The v2.0 implementation integrates multiple data sources:
 ### 1. Data Preparation
 - Load CDC panel data for states and U.S. totals
 - Load the South Carolina target series and national-total series as needed
-- Load MUSC and Prisma weekly EHR series
+- Load weekly EHR series
 - Align datasets by week and standardize column names
 - Create the weekly panel used for forecasting and pooled-state training
 
@@ -153,7 +153,6 @@ suppressPackageStartupMessages({
 
 ### Data Files
 The implementation uses the following data inputs as represented in `QR.r`:
-- RFA weekly influenza data series for the state-level target
 - CDC admissions panel data for states and U.S. national total
 - Prisma Health weekly influenza EHR and testing data
 - Output directories for CDC submission, software implementation, and evaluation files
