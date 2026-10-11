@@ -50,7 +50,7 @@ Phase detection drives adaptive interval scaling and QR/analog balance adjustmen
 The v2.0 implementation integrates multiple data sources:
 - CDC weekly influenza hospital admission data for state-level panels and the U.S. total
 - South Carolina target data extracted from the CDC panel using the SC FIPS/location mapping
-- EHR surveillance data from Prisma Health and MUSC
+- EHR surveillance data 
 - External state-level signal for the fraction of other states rising (`pct_states_rising`)
 - Optional pooling of other states for additional training rows, rescaled to South Carolina population
 
@@ -155,7 +155,6 @@ suppressPackageStartupMessages({
 The implementation uses the following data inputs as represented in `QR.r`:
 - RFA weekly influenza data series for the state-level target
 - CDC admissions panel data for states and U.S. national total
-- MUSC weekly influenza EHR data
 - Prisma Health weekly influenza EHR and testing data
 - Output directories for CDC submission, software implementation, and evaluation files
 
