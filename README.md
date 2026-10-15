@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains the model implementation for forecasting weekly influenza hospital admissions for South Carolina and for the U.S. national total. The workflow is a recursive quantile-regression model that blends trend-aware quantile regression with historical analogs, with EHR and cross-state signals available as additional predictors in the v2.0 implementation.
+This repository contains the model implementation for forecasting weekly influenza hospital admissions for South Carolina and for the U.S. national total. The workflow is a recursive quantile-regression forecasting pipeline that combines one-step quantile regression with phase-aware analog corrections and origin-only (leakage protected) training.
 
 
 
@@ -18,7 +18,7 @@ This repository contains the model implementation for forecasting weekly influen
 - Quantile Regression (QR): recursive one-step model using covariates engineered from the observed and synthetic series
 - Analog Correction: historical periods with similar epidemiologic state are used to adjust predictions
 - Phase-aware blending: decline and peak conditions can modify the QR/analog balance
-- External signals: the v2.0 workflow supports a cross-state signal (`pct_states_rising`) and optional pooled-state training
+- External signals: the current implementation supports a cross-state signal (`pct_states_rising`) and optional pooled-state training
 
 ### 3. Feature Engineering
 The model uses engineered features including:
@@ -47,7 +47,7 @@ The model identifies and adapts to epidemic phases including:
 Phase detection drives adaptive interval scaling and QR/analog balance adjustments.
 
 ### 5. Data Integration
-The v2.0 implementation integrates multiple data sources:
+The implementation integrates multiple data sources:
 - CDC weekly influenza hospital admission data for state-level panels and the U.S. total
 - South Carolina target data extracted from the CDC panel using the SC FIPS/location mapping
 - EHR surveillance data 
@@ -66,7 +66,6 @@ The v2.0 implementation integrates multiple data sources:
   - Recursive forecast generation for horizons 0, 1, 2, and 3
   - Quantile interval construction and forecast outputs
   - Diagnostics and visualization
-  - CDC submission and evaluation outputs
 
 - `DMAPRIME-QR.yml` - Model metadata and documentation
   - Team and model metadata
@@ -214,5 +213,5 @@ Creative Commons Attribution 4.0 International (CC-BY-4.0)
 
 ---
 
-**Last Updated**: 2026-10-10  
-**Model Version**: 2.0
+**Last Updated**: 2026-10-14  
+**Model Version**: v5.4-LP
